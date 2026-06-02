@@ -1,0 +1,699 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+set -euo pipefail
+
+APP_NAME="llm-scheduler"
+SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/llm-usage"
+CLAUDE_CACHE="$CACHE_DIR/claude-status.json"
+CLAUDE_API_CACHE="$CACHE_DIR/claude-usage-api.json"
+USAGE_LOG_FILE="$SCRIPT_DIR/llm-usage.log"
+
+# shellcheck source=lib/llm-common.sh
+. "$SCRIPT_DIR/lib/llm-common.sh"
+
+TOOL=""
+PROMPT_TEXT=""
+PROMPT_FILE=""
+PROMPT_SOURCE=""
+AT_TIME=""
+WINDOW="auto"
+MIN_REMAINING="1"
+POLL_INTERVAL="60"
+RETRY_DELAYS="60,180,600"
+NO_RETRY=0
+CWD="$(pwd)"
+EXEC_MODE="fresh"
+TMUX_TARGET=""
+COMMAND_TEMPLATE=""
+AUTO_CONFIRM=1
+LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/llm-scheduler/logs"
+DRY_RUN=0
+WAKE=0
+WAKE_TEST=0
+
+RUN_DIR=""
+TEXT_LOG=""
+EVENT_LOG=""
+PROMPT_SHA=""
+PROMPT_PATH=""
+
+usage() {
+  cat <<USAGE
+Usage: $APP_NAME --tool codex|claude|copilot (--prompt TEXT | --prompt-file FILE) [options]
+
+Submit a prompt to a local LLM CLI as soon as shared llm-usage data says it is usable.
+
+Examples:
+  llm-scheduler --tool codex --prompt-file task.md
+  llm-scheduler --tool claude --prompt "Continue the work in this repo until CI is green"
+  llm-scheduler --tool copilot --prompt-file task.md --retry-delays 60,180,600
+  llm-scheduler --tool codex --prompt-file task.md --at "23:05"
+  llm-scheduler --tool codex --prompt-file task.md --tmux llm-work
+  llm-scheduler --tool codex --prompt-file task.md --wake
+  llm-scheduler --tool codex --prompt-file task.md --dry-run
+
+Options:
+  --tool TOOL                 codex, claude, or copilot.
+  --prompt TEXT               Prompt text.
+  --prompt-file FILE          Read prompt from FILE, preserving content.
+  --at TIME, --not-before TIME  Do not submit before date -d compatible local time.
+  --window auto|5h|weekly|monthly  Usage window to gate on (default: auto).
+  --min-remaining PERCENT     Minimum required remaining percentage (default: 1).
+  --poll-interval SECONDS     Poll interval when reset data is unavailable (default: 60).
+  --retry-delays LIST         Comma-separated retry delays (default: 60,180,600).
+  --no-retry                  Disable retries after failed submission.
+  --cwd DIR                   Working directory for the target CLI (default: current directory).
+  --fresh                     Launch a fresh CLI process (default).
+  --tmux SESSION[:WINDOW]     Execute via tmux instead of foreground process.
+  --command-template TEMPLATE Override provider command; placeholders: {prompt}, {prompt_file}, {cwd}.
+  --auto-confirm              Acknowledge only known safe prompts (default).
+  --no-auto-confirm           Disable automatic prompt acknowledgement.
+  --log-dir DIR               Log directory (default: ~/.cache/llm-scheduler/logs).
+  --dry-run                   Resolve state and command plan without submitting.
+  --wake                      Best-effort wake scheduling diagnostics/logging.
+  --wake-test                 Print wake capability diagnostics and exit.
+  -h, --help                  Show this help.
+USAGE
+}
+
+err() {
+  printf 'error: %s\n' "$*" >&2
+}
+
+is_number() {
+  [[ "${1:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]
+}
+
+is_integer() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+json_quote() {
+  jq -Rn --arg v "${1:-}" '$v'
+}
+
+log_text() {
+  local msg="$1"
+  [[ -n "$TEXT_LOG" ]] || return 0
+  printf '[%s] %s\n' "$(date -Is)" "$msg" >> "$TEXT_LOG"
+}
+
+log_event() {
+  local type="$1"
+  local data
+  if [[ $# -ge 2 && -n "${2:-}" ]]; then
+    data="$2"
+  else
+    data="{}"
+  fi
+  [[ -n "$EVENT_LOG" ]] || return 0
+  jq -nc --arg ts "$(date -Is)" --arg type "$type" --argjson data "$data" \
+    '{ts:$ts,type:$type,data:$data}' >> "$EVENT_LOG"
+}
+
+safe_args_json() {
+  jq -nc \
+    --arg tool "$TOOL" \
+    --arg window "$WINDOW" \
+    --arg min_remaining "$MIN_REMAINING" \
+    --arg poll_interval "$POLL_INTERVAL" \
+    --arg retry_delays "$RETRY_DELAYS" \
+    --arg cwd "$CWD" \
+    --arg mode "$EXEC_MODE" \
+    --arg tmux "$TMUX_TARGET" \
+    --arg prompt_source "$PROMPT_SOURCE" \
+    --arg log_dir "$LOG_DIR" \
+    --argjson auto_confirm "$AUTO_CONFIRM" \
+    --argjson dry_run "$DRY_RUN" \
+    --argjson wake "$WAKE" \
+    '{tool:$tool,window:$window,min_remaining:($min_remaining|tonumber),poll_interval:($poll_interval|tonumber),retry_delays:$retry_delays,cwd:$cwd,mode:$mode,tmux:$tmux,prompt_source:$prompt_source,log_dir:$log_dir,auto_confirm:$auto_confirm,dry_run:$dry_run,wake:$wake}'
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --tool) [[ $# -ge 2 ]] || { err "--tool requires a value"; exit 2; }; TOOL="$2"; shift 2 ;;
+      --prompt) [[ $# -ge 2 ]] || { err "--prompt requires text"; exit 2; }; PROMPT_TEXT="$2"; PROMPT_SOURCE="inline"; shift 2 ;;
+      --prompt-file) [[ $# -ge 2 ]] || { err "--prompt-file requires a file"; exit 2; }; PROMPT_FILE="$2"; PROMPT_SOURCE="file:$2"; shift 2 ;;
+      --at|--not-before) [[ $# -ge 2 ]] || { err "$1 requires a time"; exit 2; }; AT_TIME="$2"; shift 2 ;;
+      --window) [[ $# -ge 2 ]] || { err "--window requires a value"; exit 2; }; WINDOW="$2"; shift 2 ;;
+      --min-remaining) [[ $# -ge 2 ]] || { err "--min-remaining requires a value"; exit 2; }; MIN_REMAINING="$2"; shift 2 ;;
+      --poll-interval) [[ $# -ge 2 ]] || { err "--poll-interval requires seconds"; exit 2; }; POLL_INTERVAL="$2"; shift 2 ;;
+      --retry-delays) [[ $# -ge 2 ]] || { err "--retry-delays requires a list"; exit 2; }; RETRY_DELAYS="$2"; shift 2 ;;
+      --no-retry) NO_RETRY=1; RETRY_DELAYS=""; shift ;;
+      --cwd) [[ $# -ge 2 ]] || { err "--cwd requires a directory"; exit 2; }; CWD="$2"; shift 2 ;;
+      --fresh) EXEC_MODE="fresh"; TMUX_TARGET=""; shift ;;
+      --tmux) [[ $# -ge 2 ]] || { err "--tmux requires SESSION[:WINDOW]"; exit 2; }; EXEC_MODE="tmux"; TMUX_TARGET="$2"; shift 2 ;;
+      --command-template) [[ $# -ge 2 ]] || { err "--command-template requires a template"; exit 2; }; COMMAND_TEMPLATE="$2"; shift 2 ;;
+      --auto-confirm) AUTO_CONFIRM=1; shift ;;
+      --no-auto-confirm) AUTO_CONFIRM=0; shift ;;
+      --log-dir) [[ $# -ge 2 ]] || { err "--log-dir requires a directory"; exit 2; }; LOG_DIR="$2"; shift 2 ;;
+      --dry-run) DRY_RUN=1; shift ;;
+      --wake) WAKE=1; shift ;;
+      --wake-test) WAKE_TEST=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) err "unknown option: $1"; usage >&2; exit 2 ;;
+    esac
+  done
+}
+
+validate_args() {
+  if [[ "$WAKE_TEST" -eq 1 ]]; then
+    return 0
+  fi
+  case "$TOOL" in
+    codex|claude|copilot) ;;
+    "") err "--tool is required"; exit 2 ;;
+    *) err "invalid --tool: $TOOL"; exit 2 ;;
+  esac
+  if [[ -n "$PROMPT_TEXT" && -n "$PROMPT_FILE" ]]; then
+    err "use exactly one of --prompt or --prompt-file"
+    exit 2
+  fi
+  if [[ -z "$PROMPT_TEXT" && -z "$PROMPT_FILE" ]]; then
+    err "one of --prompt or --prompt-file is required"
+    exit 2
+  fi
+  if [[ -n "$PROMPT_FILE" && ! -r "$PROMPT_FILE" ]]; then
+    err "prompt file is not readable: $PROMPT_FILE"
+    exit 2
+  fi
+  [[ -d "$CWD" ]] || { err "--cwd is not a directory: $CWD"; exit 2; }
+  case "$WINDOW" in
+    auto|5h|weekly|monthly) ;;
+    *) err "invalid --window: $WINDOW"; exit 2 ;;
+  esac
+  is_number "$MIN_REMAINING" || { err "--min-remaining must be numeric"; exit 2; }
+  is_integer "$POLL_INTERVAL" || { err "--poll-interval must be integer seconds"; exit 2; }
+  if (( POLL_INTERVAL < 1 )); then
+    err "--poll-interval must be at least 1"
+    exit 2
+  fi
+  validate_retry_delays "$RETRY_DELAYS"
+}
+
+validate_retry_delays() {
+  local list="${1:-}" part
+  [[ -n "$list" ]] || return 0
+  IFS=',' read -r -a parts <<< "$list"
+  for part in "${parts[@]}"; do
+    is_integer "$part" || { err "--retry-delays must be comma-separated integer seconds"; exit 2; }
+  done
+}
+
+load_prompt() {
+  if [[ -n "$PROMPT_FILE" ]]; then
+    PROMPT_PATH="$PROMPT_FILE"
+    cp "$PROMPT_FILE" "$RUN_DIR/prompt.txt"
+    IFS= read -r -d '' PROMPT_TEXT < "$RUN_DIR/prompt.txt" || true
+  else
+    PROMPT_PATH="$RUN_DIR/prompt.txt"
+    printf '%s' "$PROMPT_TEXT" > "$RUN_DIR/prompt.txt"
+  fi
+  chmod 600 "$RUN_DIR/prompt.txt"
+  PROMPT_SHA="$(sha256sum "$RUN_DIR/prompt.txt" | awk '{print $1}')"
+}
+
+setup_logs() {
+  local stamp
+  stamp="$(date '+%Y%m%d-%H%M%S')"
+  umask 077
+  mkdir -p "$LOG_DIR"
+  chmod 700 "$LOG_DIR" 2>/dev/null || true
+  RUN_DIR="$(mktemp -d "$LOG_DIR/${stamp}-${TOOL:-wake}-XXXXXX")"
+  chmod 700 "$RUN_DIR" 2>/dev/null || true
+  TEXT_LOG="$RUN_DIR/run.log"
+  EVENT_LOG="$RUN_DIR/events.jsonl"
+  : > "$TEXT_LOG"
+  : > "$EVENT_LOG"
+  chmod 600 "$TEXT_LOG" "$EVENT_LOG" 2>/dev/null || true
+}
+
+parse_not_before_epoch() {
+  if [[ -z "$AT_TIME" ]]; then
+    now_epoch
+    return
+  fi
+  date -d "$AT_TIME" +%s 2>/dev/null || {
+    err "could not parse --at/--not-before time: $AT_TIME"
+    exit 2
+  }
+}
+
+scheduler_usage_snapshot() {
+  local raw provider_json
+  if [[ -n "${LLM_SCHEDULER_USAGE_JSON:-}" ]]; then
+    raw="$LLM_SCHEDULER_USAGE_JSON"
+    provider_json="$(jq -c --arg tool "$TOOL" 'if has($tool) then .[$tool] else . end' <<<"$raw")"
+    printf '%s\n' "$provider_json"
+    return
+  fi
+
+  case "$TOOL" in
+    codex)
+      raw="$(read_codex || true)"
+      json_for_provider "$raw" codex
+      ;;
+    claude)
+      raw="$(read_claude || true)"
+      json_for_provider "$raw" claude
+      ;;
+    copilot)
+      raw="$(read_copilot || true)"
+      json_for_copilot "$raw" 0
+      ;;
+  esac
+}
+
+usage_decision() {
+  local snapshot="$1"
+  jq -nc \
+    --arg tool "$TOOL" \
+    --arg window "$WINDOW" \
+    --argjson min "$MIN_REMAINING" \
+    --argjson now "$(now_epoch)" \
+    --argjson poll "$POLL_INTERVAL" \
+    --argjson copilot_reset "$(copilot_monthly_reset_epoch | sed 's/^-$/null/')" \
+    --argjson snapshot "$snapshot" '
+      def num: if type == "number" then . elif type == "string" then (tonumber? // null) else null end;
+      def reset_epoch($r):
+        if $r == null then null
+        elif ($r|type) == "number" then ($r|floor)
+        elif ($r|test("^[0-9]+(\\.[0-9]+)?$")) then ($r|tonumber|floor)
+        elif ($r|type) == "string" then (($r | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601?) // null)
+        else null end;
+      def win($name; $obj):
+        if $obj == null then empty
+        else {name:$name, remaining:($obj.remaining|num), resets_at:($obj.resets_at // null), reset_epoch:reset_epoch($obj.resets_at)}
+        end;
+      def selected:
+        if $tool == "copilot" then
+          if ($window == "auto" or $window == "monthly") then
+            [ {name:"monthly", remaining:(.monthly.remaining|num), resets_at:($copilot_reset|tostring), reset_epoch:$copilot_reset} ]
+          else [] end
+        elif $window == "auto" then
+          [win("5h"; .five_hour), win("weekly"; .week)]
+        elif $window == "5h" then
+          [win("5h"; .five_hour)]
+        elif $window == "weekly" then
+          [win("weekly"; .week)]
+        else [] end;
+      $snapshot
+      | selected as $windows
+      | ($windows | map(select(.remaining != null))) as $known
+      | ($known | map(select(.remaining <= $min))) as $exhausted
+      | ($exhausted | map(.reset_epoch // empty) | max? // null) as $latest_reset
+      | if (.available? == false) then
+          {usable:false, reason:(.reason // "unavailable"), wait_until:($now + $poll), windows:$windows}
+        elif ($windows|length) == 0 then
+          {usable:false, reason:"unsupported-window", wait_until:($now + $poll), windows:$windows}
+        elif ($known|length) == 0 then
+          {usable:false, reason:"inconclusive-usage", wait_until:($now + $poll), windows:$windows}
+        elif ($exhausted|length) > 0 then
+          {usable:false, reason:"rate-limited", wait_until:(if $latest_reset != null and $latest_reset > $now then $latest_reset else ($now + $poll) end), windows:$windows, exhausted:$exhausted}
+        else
+          {usable:true, reason:"usable", wait_until:null, windows:$windows}
+        end'
+}
+
+sleep_until() {
+  local target="$1" now seconds
+  now="$(now_epoch)"
+  seconds=$(( target - now ))
+  (( seconds > 0 )) || return 0
+  sleep "$seconds"
+}
+
+provider_default_argv_json() {
+  case "$TOOL" in
+    codex)
+      jq -nc --arg prompt "$PROMPT_TEXT" --arg cwd "$CWD" '["codex","exec","-C",$cwd,$prompt]'
+      ;;
+    claude)
+      jq -nc --arg prompt "$PROMPT_TEXT" '["claude","--print",$prompt]'
+      ;;
+    copilot)
+      jq -nc --arg prompt "$PROMPT_TEXT" --arg cwd "$CWD" '["copilot","-C",$cwd,"--prompt",$prompt]'
+      ;;
+  esac
+}
+
+template_argv_json() {
+  local template="$1"
+  TEMPLATE="$template" PROMPT="$PROMPT_TEXT" PROMPT_FILE="$RUN_DIR/prompt.txt" CWD_VALUE="$CWD" python3 - <<'PY'
+import json
+import os
+import shlex
+import sys
+
+try:
+    parts = shlex.split(os.environ["TEMPLATE"])
+except ValueError as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(2)
+
+values = {
+    "{prompt}": os.environ.get("PROMPT", ""),
+    "{prompt_file}": os.environ.get("PROMPT_FILE", ""),
+    "{cwd}": os.environ.get("CWD_VALUE", ""),
+}
+out = []
+for part in parts:
+    for key, value in values.items():
+        part = part.replace(key, value)
+    out.append(part)
+print(json.dumps(out))
+PY
+}
+
+command_argv_json() {
+  if [[ -n "$COMMAND_TEMPLATE" ]]; then
+    template_argv_json "$COMMAND_TEMPLATE"
+  else
+    provider_default_argv_json
+  fi
+}
+
+run_fresh() {
+  local argv_json="$1"
+  local output_file="$2"
+  local status_file="$3"
+  AUTO_CONFIRM_VALUE="$AUTO_CONFIRM" CWD_VALUE="$CWD" ARGV_JSON="$argv_json" OUTPUT_FILE="$output_file" STATUS_FILE="$status_file" python3 - <<'PY'
+import json
+import os
+import pty
+import re
+import select
+import signal
+import sys
+import time
+
+argv = json.loads(os.environ["ARGV_JSON"])
+cwd = os.environ["CWD_VALUE"]
+output_file = os.environ["OUTPUT_FILE"]
+status_file = os.environ["STATUS_FILE"]
+auto_confirm = os.environ.get("AUTO_CONFIRM_VALUE") == "1"
+timeout = int(os.environ.get("LLM_SCHEDULER_PTY_TIMEOUT", "3600"))
+
+safe_prompts = (
+    "Confirm folder trust",
+    "Do you trust the files in this folder?",
+)
+
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        os.chdir(cwd)
+    except OSError:
+        pass
+    os.execvp(argv[0], argv)
+
+parts = []
+trust_sent = False
+exit_code = 124
+start = time.time()
+
+while True:
+    if time.time() - start > timeout:
+        break
+    ready, _, _ = select.select([fd], [], [], 0.2)
+    if fd in ready:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        text = chunk.decode("utf-8", "replace")
+        parts.append(text)
+        combined = "".join(parts)
+        if auto_confirm and not trust_sent and any(p in combined for p in safe_prompts):
+            os.write(fd, b"\r")
+            trust_sent = True
+    try:
+        done, status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        done = pid
+        status = 0
+    if done == pid:
+        if os.WIFEXITED(status):
+            exit_code = os.WEXITSTATUS(status)
+        elif os.WIFSIGNALED(status):
+            exit_code = 128 + os.WTERMSIG(status)
+        break
+
+if exit_code == 124:
+    try:
+        done, status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        done = pid
+        status = 0
+    if done == pid:
+        if os.WIFEXITED(status):
+            exit_code = os.WEXITSTATUS(status)
+        elif os.WIFSIGNALED(status):
+            exit_code = 128 + os.WTERMSIG(status)
+
+if exit_code == 124:
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            break
+        time.sleep(0.2)
+
+text = "".join(parts).replace("\r", "\n").replace("\a", "")
+text = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", text)
+with open(output_file, "w", encoding="utf-8") as fh:
+    fh.write(text)
+with open(status_file, "w", encoding="utf-8") as fh:
+    fh.write(str(exit_code))
+sys.exit(exit_code)
+PY
+}
+
+run_tmux() {
+  local argv_json="$1"
+  local output_file="$2"
+  local status_file="$3"
+  have_cmd tmux || {
+    printf 'tmux not installed\n' > "$output_file"
+    printf '127' > "$status_file"
+    return 127
+  }
+  local session window target cmd_file command_line waited
+  session="${TMUX_TARGET%%:*}"
+  window="${TMUX_TARGET#*:}"
+  if [[ "$session" == "$window" ]]; then
+    window="llm-scheduler"
+  fi
+  target="$session:$window"
+  cmd_file="$RUN_DIR/tmux-command.sh"
+  command_line="$(ARGV_JSON="$argv_json" python3 - <<'PY'
+import json
+import os
+import shlex
+
+argv = json.loads(os.environ["ARGV_JSON"])
+print(" ".join(shlex.quote(x) for x in argv))
+PY
+)"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -euo pipefail'
+    printf 'cd %q\n' "$CWD"
+    printf '%s\n' 'set +e'
+    printf '%s\n' "$command_line"
+    printf '%s\n' 'status=$?'
+    printf 'printf %%s "$status" > %q\n' "$status_file"
+    printf '%s\n' 'exit "$status"'
+  } > "$cmd_file"
+  chmod 700 "$cmd_file"
+  if ! tmux has-session -t "$session" 2>/dev/null; then
+    tmux new-session -d -s "$session" -n "$window" "bash '$cmd_file'"
+  elif ! tmux list-windows -t "$session" -F '#W' | grep -Fxq "$window"; then
+    tmux new-window -d -t "$session" -n "$window" "bash '$cmd_file'"
+  else
+    tmux send-keys -t "$target" "bash '$cmd_file'" C-m
+  fi
+  waited=0
+  while [[ ! -s "$status_file" && "$waited" -lt "${LLM_SCHEDULER_TMUX_TIMEOUT:-3600}" ]]; do
+    tmux capture-pane -p -t "$target" > "$output_file" 2>/dev/null || true
+    sleep 1
+    waited=$(( waited + 1 ))
+  done
+  tmux capture-pane -p -t "$target" > "$output_file" 2>/dev/null || true
+  if [[ ! -s "$status_file" ]]; then
+    printf '124' > "$status_file"
+  fi
+}
+
+output_is_retryable() {
+  local status="$1"
+  local output_file="$2"
+  if [[ "$status" -ne 0 ]]; then
+    return 0
+  fi
+  if grep -Eiq 'rate.?limit|quota|try again|temporar|timeout|too many requests' "$output_file"; then
+    return 0
+  fi
+  return 1
+}
+
+submit_once() {
+  local attempt="$1" argv_json="$2" output_file status_file status
+  output_file="$RUN_DIR/attempt-${attempt}.out"
+  status_file="$RUN_DIR/attempt-${attempt}.status"
+  log_text "attempt $attempt command: $(jq -c . <<<"$argv_json")"
+  log_event "command_plan" "$(jq -nc --argjson argv "$argv_json" --arg mode "$EXEC_MODE" '{mode:$mode, argv:$argv}')"
+  if [[ "$EXEC_MODE" == "tmux" ]]; then
+    run_tmux "$argv_json" "$output_file" "$status_file" || true
+  else
+    run_fresh "$argv_json" "$output_file" "$status_file" || true
+  fi
+  status="$(<"$status_file")"
+  cat "$output_file" >> "$TEXT_LOG"
+  log_event "attempt_result" "$(jq -nc --argjson attempt "$attempt" --argjson status "$status" --rawfile output "$output_file" '{attempt:$attempt,status:$status,output:$output}')"
+  if output_is_retryable "$status" "$output_file"; then
+    return 1
+  fi
+  return 0
+}
+
+retry_delays_array() {
+  local list="${1:-}"
+  RETRY_ARRAY=()
+  [[ -n "$list" ]] || return 0
+  IFS=',' read -r -a RETRY_ARRAY <<< "$list"
+}
+
+wake_diagnostics_json() {
+  local has_systemd_run=0 has_rtcwake=0 user_systemd="unknown"
+  have_cmd systemd-run && has_systemd_run=1
+  have_cmd rtcwake && has_rtcwake=1
+  if have_cmd systemctl && systemctl --user is-system-running >/dev/null 2>&1; then
+    user_systemd="available"
+  fi
+  jq -nc --argjson systemd_run "$has_systemd_run" --argjson rtcwake "$has_rtcwake" --arg user_systemd "$user_systemd" \
+    '{systemd_run:($systemd_run==1),rtcwake:($rtcwake==1),user_systemd:$user_systemd,note:"wake is best effort and depends on firmware, kernel, RTC, and systemd support"}'
+}
+
+print_wake_test() {
+  wake_diagnostics_json | jq .
+}
+
+log_wake_plan() {
+  local target_epoch="$1"
+  local wake_epoch cmd unit output status
+  (( WAKE == 1 )) || return 0
+  wake_epoch=$(( target_epoch - 120 ))
+  (( wake_epoch > $(now_epoch) )) || wake_epoch="$target_epoch"
+  unit="llm-scheduler-wake-$(date +%s)"
+  cmd="systemd-run --user --unit=$unit --on-calendar=@$wake_epoch --timer-property=WakeSystem=true true"
+  log_event "wake_diagnostics" "$(wake_diagnostics_json)"
+  log_text "wake best-effort command: $cmd"
+  log_text "rtcwake fallback, if appropriate and run manually with privileges: sudo rtcwake -m no -t $wake_epoch"
+  if (( DRY_RUN == 0 )) && have_cmd systemd-run; then
+    set +e
+    output="$(systemd-run --user --unit="$unit" --on-calendar="@$wake_epoch" --timer-property=WakeSystem=true true 2>&1)"
+    status=$?
+    set -e
+    log_text "wake systemd-run status=$status output=$output"
+    log_event "wake_attempt" "$(jq -nc --arg unit "$unit" --argjson wake_epoch "$wake_epoch" --argjson status "$status" --arg output "$output" '{method:"systemd-run",unit:$unit,wake_epoch:$wake_epoch,status:$status,output:$output}')"
+  fi
+}
+
+wait_until_usable() {
+  local not_before snapshot decision usable wait_until reason now target
+  not_before="$(parse_not_before_epoch)"
+  while true; do
+    now="$(now_epoch)"
+    if (( now < not_before )); then
+      log_text "not-before gate active until $not_before"
+      log_event "wait_decision" "$(jq -nc --arg reason "not-before" --argjson wait_until "$not_before" '{reason:$reason,wait_until:$wait_until}')"
+      log_wake_plan "$not_before"
+      if (( DRY_RUN == 1 )); then
+        return 0
+      fi
+      sleep_until "$not_before"
+    fi
+
+    snapshot="$(scheduler_usage_snapshot)"
+    log_event "usage_snapshot" "$snapshot"
+    decision="$(usage_decision "$snapshot")"
+    log_event "usage_decision" "$decision"
+    usable="$(jq -r '.usable' <<<"$decision")"
+    reason="$(jq -r '.reason' <<<"$decision")"
+    wait_until="$(jq -r '.wait_until // empty' <<<"$decision")"
+    log_text "usage decision: $reason"
+    if [[ "$usable" == "true" ]]; then
+      return 0
+    fi
+    target="${wait_until:-$(( $(now_epoch) + POLL_INTERVAL ))}"
+    log_wake_plan "$target"
+    if (( DRY_RUN == 1 )); then
+      return 0
+    fi
+    sleep_until "$target"
+  done
+}
+
+main() {
+  parse_args "$@"
+  validate_args
+  if [[ "$WAKE_TEST" -eq 1 ]]; then
+    print_wake_test
+    exit 0
+  fi
+  need jq
+  need date
+  need sha256sum
+  need awk
+  need python3
+  setup_logs
+  load_prompt
+  log_text "start provider=$TOOL cwd=$CWD"
+  log_event "start" "$(safe_args_json)"
+  log_event "prompt" "$(jq -nc --arg source "$PROMPT_SOURCE" --arg sha256 "$PROMPT_SHA" --rawfile prompt "$RUN_DIR/prompt.txt" '{source:$source,sha256:$sha256,prompt:$prompt}')"
+
+  wait_until_usable
+  local argv_json
+  argv_json="$(command_argv_json)"
+  log_event "resolved_command" "$(jq -nc --argjson argv "$argv_json" '{argv:$argv}')"
+  if (( DRY_RUN == 1 )); then
+    log_text "dry-run complete"
+    log_event "final" '{"status":"dry-run"}'
+    printf 'dry-run: logs written to %s\n' "$RUN_DIR"
+    exit 0
+  fi
+
+  retry_delays_array "$RETRY_DELAYS"
+  local attempt=1 delay
+  if submit_once "$attempt" "$argv_json"; then
+    log_text "final status: success"
+    log_event "final" '{"status":"success"}'
+    printf 'success: logs written to %s\n' "$RUN_DIR"
+    exit 0
+  fi
+
+  for delay in "${RETRY_ARRAY[@]}"; do
+    log_text "retry after ${delay}s"
+    log_event "retry" "$(jq -nc --argjson attempt "$attempt" --argjson delay "$delay" '{after_attempt:$attempt,delay:$delay}')"
+    sleep "$delay"
+    attempt=$(( attempt + 1 ))
+    if submit_once "$attempt" "$argv_json"; then
+      log_text "final status: success"
+      log_event "final" '{"status":"success"}'
+      printf 'success: logs written to %s\n' "$RUN_DIR"
+      exit 0
+    fi
+  done
+  log_text "final status: failed"
+  log_event "final" '{"status":"failed"}'
+  printf 'failed: logs written to %s\n' "$RUN_DIR" >&2
+  exit 1
+}
+
+main "$@"

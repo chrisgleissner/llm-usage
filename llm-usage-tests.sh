@@ -4,6 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL="$SCRIPT_DIR/llm-usage"
+SCHEDULER="$SCRIPT_DIR/llm-scheduler"
 PATH="$SCRIPT_DIR/ci-bin:$PATH"
 
 fail() {
@@ -25,6 +26,14 @@ assert_not_grep() {
   fi
 }
 
+expect_fail() {
+  local output_file="$1"
+  shift
+  if "$@" >"$output_file" 2>&1; then
+    fail "command unexpectedly succeeded: $*"
+  fi
+}
+
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
@@ -34,12 +43,49 @@ mkdir -p \
   "$HOME_FIXTURE/.claude/projects" \
   "$HOME_FIXTURE/.cache" \
   "$tmpdir/ci-bin"
+PATH="$tmpdir/ci-bin:$PATH"
 
 cat > "$tmpdir/ci-bin/copilot" <<'COP'
 #!/usr/bin/env bash
 sleep 99
 COP
 chmod +x "$tmpdir/ci-bin/copilot"
+
+cat > "$tmpdir/ci-bin/sched-mock" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${SCHED_CAPTURE:?}"
+printf 'attempt\n' >> "${SCHED_ATTEMPTS:?}"
+fail_until="${SCHED_FAIL_UNTIL:-0}"
+attempts="$(wc -l < "${SCHED_ATTEMPTS:?}")"
+if (( attempts <= fail_until )); then
+  printf 'temporary rate limit\n'
+  exit 42
+fi
+printf 'mock ok\n'
+MOCK
+chmod +x "$tmpdir/ci-bin/sched-mock"
+
+cat > "$tmpdir/ci-bin/trust-mock" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'Confirm folder trust\n'
+IFS= read -r _line
+printf 'trusted\n'
+MOCK
+chmod +x "$tmpdir/ci-bin/trust-mock"
+
+cat > "$tmpdir/ci-bin/unsafe-mock" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'Unsafe confirmation prompt\n'
+if IFS= read -r -t 1 _line; then
+  printf 'unexpected input\n'
+  exit 9
+fi
+printf 'no input\n'
+MOCK
+chmod +x "$tmpdir/ci-bin/unsafe-mock"
 
 cat > "$HOME_FIXTURE/.codex/sessions/session-20260602.jsonl" <<'JSON'
 {"rate_limits":{"primary":{"used_percent":53,"window_minutes":300,"resets_at":"2026-06-02T13:49:00Z"},"secondary":{"used_percent":59,"window_minutes":10080,"resets_at":"2026-06-07T16:25:00Z"},"spark":{"primary":{"used_percent":99,"resets_at":"2026-06-02T22:26:00Z"},"secondary":{"used_percent":96,"resets_at":"2026-06-08T17:49:00Z"}}}}
@@ -171,5 +217,116 @@ LLM_USAGE_NOW_EPOCH=1750000000 \
   LLM_USAGE_COPILOT_MONTHLY_RESET_OFFSET_DAYS=2 \
   run_tool "$tmpdir/copilot-reset-offset.txt" --show-source
 assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+95%[[:space:]]+-[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]+[0-9]{2}:[0-9]{2}[[:space:]]+[0-9]' "$tmpdir/copilot-reset-offset.txt"
+
+"$SCHEDULER" --help > "$tmpdir/scheduler-help.txt"
+assert_grep 'Usage: llm-scheduler --tool codex\|claude\|copilot' "$tmpdir/scheduler-help.txt"
+
+expect_fail "$tmpdir/scheduler-no-prompt.txt" "$SCHEDULER" --tool codex
+assert_grep 'one of --prompt or --prompt-file is required' "$tmpdir/scheduler-no-prompt.txt"
+expect_fail "$tmpdir/scheduler-dupe-prompt.txt" "$SCHEDULER" --tool codex --prompt x --prompt-file "$tmpdir/missing"
+assert_grep 'use exactly one of --prompt or --prompt-file' "$tmpdir/scheduler-dupe-prompt.txt"
+expect_fail "$tmpdir/scheduler-bad-tool.txt" "$SCHEDULER" --tool bad --prompt x
+assert_grep 'invalid --tool' "$tmpdir/scheduler-bad-tool.txt"
+expect_fail "$tmpdir/scheduler-bad-retry.txt" "$SCHEDULER" --tool codex --prompt x --retry-delays 1,no
+assert_grep 'retry-delays' "$tmpdir/scheduler-bad-retry.txt"
+expect_fail "$tmpdir/scheduler-bad-threshold.txt" "$SCHEDULER" --tool codex --prompt x --min-remaining nope
+assert_grep 'min-remaining' "$tmpdir/scheduler-bad-threshold.txt"
+expect_fail "$tmpdir/scheduler-missing-file.txt" "$SCHEDULER" --tool codex --prompt-file "$tmpdir/no-such-file"
+assert_grep 'prompt file is not readable' "$tmpdir/scheduler-missing-file.txt"
+
+available_usage='{"available":true,"five_hour":{"remaining":50,"resets_at":"2026-06-02T23:00:00Z"},"week":{"remaining":50,"resets_at":"2026-06-07T23:00:00Z"}}'
+exhausted_usage='{"available":true,"five_hour":{"remaining":0,"resets_at":"2026-06-02T23:00:00Z"},"week":{"remaining":50,"resets_at":"2026-06-07T23:00:00Z"}}'
+weekly_exhausted_usage='{"available":true,"five_hour":{"remaining":50,"resets_at":"2026-06-02T23:00:00Z"},"week":{"remaining":0,"resets_at":"2026-06-07T23:00:00Z"}}'
+copilot_usage='{"available":true,"monthly":{"remaining":25}}'
+
+SCHED_CAPTURE="$tmpdir/sched-capture.txt"
+SCHED_ATTEMPTS="$tmpdir/sched-attempts.txt"
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+  "$SCHEDULER" --tool codex --prompt 'hello world' --command-template 'sched-mock {prompt}' --log-dir "$tmpdir/scheduler-logs" > "$tmpdir/scheduler-submit.txt"
+assert_grep '^hello world$' "$SCHED_CAPTURE"
+[[ "$(wc -l < "$SCHED_ATTEMPTS")" == "1" ]] || fail "scheduler did not submit exactly once"
+
+LLM_USAGE_NOW_EPOCH=1780430000 \
+LLM_SCHEDULER_USAGE_JSON="$exhausted_usage" \
+  "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' --dry-run --log-dir "$tmpdir/scheduler-dry-logs" > "$tmpdir/scheduler-dry.txt"
+dry_dir="$(awk '{print $NF}' "$tmpdir/scheduler-dry.txt")"
+jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited" and .data.wait_until == 1780441200' "$dry_dir/events.jsonl" >/dev/null \
+  || fail "dry-run did not record reset wait decision"
+
+LLM_USAGE_NOW_EPOCH=1780430000 \
+LLM_SCHEDULER_USAGE_JSON="$weekly_exhausted_usage" \
+  "$SCHEDULER" --tool claude --prompt x --command-template 'sched-mock {prompt}' --dry-run --log-dir "$tmpdir/scheduler-weekly-logs" > "$tmpdir/scheduler-weekly.txt"
+weekly_dir="$(awk '{print $NF}' "$tmpdir/scheduler-weekly.txt")"
+jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited" and (.data.exhausted[]?.name == "weekly")' "$weekly_dir/events.jsonl" >/dev/null \
+  || fail "scheduler did not consider weekly Claude/Codex window"
+
+LLM_USAGE_NOW_EPOCH=1780430000 \
+LLM_SCHEDULER_USAGE_JSON="$weekly_exhausted_usage" \
+  "$SCHEDULER" --tool claude --prompt x --window 5h --command-template 'sched-mock {prompt}' --dry-run --log-dir "$tmpdir/scheduler-5h-logs" > "$tmpdir/scheduler-5h.txt"
+five_dir="$(awk '{print $NF}' "$tmpdir/scheduler-5h.txt")"
+jq -e 'select(.type=="usage_decision") | .data.reason == "usable"' "$five_dir/events.jsonl" >/dev/null \
+  || fail "scheduler --window 5h did not limit gating to 5h"
+
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+expect_fail "$tmpdir/scheduler-retry-fail.txt" env \
+  LLM_SCHEDULER_USAGE_JSON="$copilot_usage" SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" SCHED_FAIL_UNTIL=9 \
+  "$SCHEDULER" --tool copilot --prompt x --command-template 'sched-mock {prompt}' --retry-delays 0,0 --log-dir "$tmpdir/scheduler-retry-fail-logs"
+[[ "$(wc -l < "$SCHED_ATTEMPTS")" == "3" ]] || fail "retry exhaustion did not run initial plus two retries"
+
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+LLM_SCHEDULER_USAGE_JSON="$copilot_usage" \
+  SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" SCHED_FAIL_UNTIL=1 \
+  "$SCHEDULER" --tool copilot --prompt x --command-template 'sched-mock {prompt}' --retry-delays 0,0 --log-dir "$tmpdir/scheduler-retry-success-logs" > "$tmpdir/scheduler-retry-success.txt"
+[[ "$(wc -l < "$SCHED_ATTEMPTS")" == "2" ]] || fail "retry success did not stop after successful retry"
+
+prompt_file="$tmpdir/special prompt.txt"
+printf 'line one\nline two with ; $HOME and spaces\n' > "$prompt_file"
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+  "$SCHEDULER" --tool codex --prompt-file "$prompt_file" --command-template 'sched-mock {prompt}' --log-dir "$tmpdir/scheduler-prompt-logs" > "$tmpdir/scheduler-prompt.txt"
+prompt_dir="$(awk '{print $NF}' "$tmpdir/scheduler-prompt.txt")"
+cmp -s "$prompt_file" "$prompt_dir/prompt.txt" || fail "prompt file content was not preserved in log"
+assert_grep 'line two with ; \$HOME and spaces' "$SCHED_CAPTURE"
+
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+  "$SCHEDULER" --tool codex --prompt 'a b ; $HOME' --command-template 'sched-mock --flag {prompt}' --log-dir "$tmpdir/scheduler-template-logs" > "$tmpdir/scheduler-template.txt"
+assert_grep '^--flag a b ; \$HOME$' "$SCHED_CAPTURE"
+
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  "$SCHEDULER" --tool codex --prompt x --command-template 'trust-mock' --log-dir "$tmpdir/scheduler-trust-logs" > "$tmpdir/scheduler-trust.txt"
+trust_dir="$(awk '{print $NF}' "$tmpdir/scheduler-trust.txt")"
+assert_grep 'trusted' "$trust_dir/attempt-1.out"
+
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  "$SCHEDULER" --tool codex --prompt x --command-template 'unsafe-mock' --log-dir "$tmpdir/scheduler-unsafe-logs" > "$tmpdir/scheduler-unsafe.txt"
+unsafe_dir="$(awk '{print $NF}' "$tmpdir/scheduler-unsafe.txt")"
+assert_grep 'no input' "$unsafe_dir/attempt-1.out"
+
+if command -v tmux >/dev/null 2>&1; then
+  : > "$SCHED_CAPTURE"
+  : > "$SCHED_ATTEMPTS"
+  LLM_SCHEDULER_TMUX_TIMEOUT=5 \
+  LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+    SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+    "$SCHEDULER" --tool codex --prompt tmux-ok --command-template 'sched-mock {prompt}' --tmux "llm-usage-test-$$" --log-dir "$tmpdir/scheduler-tmux-logs" > "$tmpdir/scheduler-tmux.txt"
+  assert_grep '^tmux-ok$' "$SCHED_CAPTURE"
+  tmux kill-session -t "llm-usage-test-$$" 2>/dev/null || true
+else
+  printf 'skip: tmux not installed\n' > "$tmpdir/scheduler-tmux.txt"
+fi
+
+"$SCHEDULER" --wake-test > "$tmpdir/scheduler-wake.txt"
+jq -e '.note | contains("best effort")' "$tmpdir/scheduler-wake.txt" >/dev/null \
+  || fail "wake-test did not print diagnostics"
 
 printf 'ok\n'

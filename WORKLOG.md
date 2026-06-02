@@ -1,0 +1,26 @@
+llm-scheduler worklog
+
+- Initialized implementation plan and worklog.
+- Factored reusable non-UI helpers from `llm-usage` into `lib/llm-common.sh`.
+- Updated `llm-usage` to source the shared library while preserving rendering and CLI handling.
+- Added executable `llm-scheduler` with provider selection, prompt validation, usage gating, retry handling, PTY execution, tmux execution, logs, dry-run, and best-effort wake support.
+- Confirmed default adapter syntax from local CLI help: `codex exec`, `claude --print`, `copilot --prompt`.
+- Added scheduler tests using mocked usage JSON and mock CLI commands; no live provider calls.
+- Fixed PTY helper exit-status handling after terminal EOF.
+- Fixed prompt-file handling to preserve logged file content exactly.
+- Ran `./llm-usage-tests.sh`: ok.
+- Ran final `bash -n llm-usage llm-scheduler llm-usage-tests.sh lib/llm-common.sh`: ok.
+- Ran final `./llm-usage --json | jq . >/dev/null`: ok.
+- Ran final `./llm-usage-tests.sh`: ok.
+- Ran `shellcheck` check: skipped, not installed.
+- Ran `./llm-scheduler --wake-test`: `systemd-run` and `rtcwake` present; user systemd state reported `unknown`.
+- Ran live minimal `llm-scheduler` smoke against Codex with prompt `Reply with exactly: ok`: status 0, output `ok`.
+- Ran live minimal `llm-scheduler` smoke against Copilot with prompt `Reply with exactly: ok`: status 0, output `ok`.
+- Skipped live Claude scheduler smoke because user reported no Claude credits.
+- Renamed GitHub repository from `chrisgleissner/llm-usage` to `chrisgleissner/llm-tools` with `gh api`.
+- Updated local `origin` remote to `https://github.com/chrisgleissner/llm-tools.git`.
+- Updated README badge/release links to `llm-tools`.
+- Fixed `llm-scheduler --wake` to pass `WakeSystem=true` as a systemd timer property.
+- Ran live wake test with transient user systemd timer and `systemctl suspend`: system entered S3 at `2026-06-02 22:01:10` and resumed at `22:02:25`.
+- Wake Copilot scheduler service initially saw Copilot capture timeout at `22:02:35`, then polled again, submitted prompt, and received `ok` at `22:03:45`.
+- Ran post-wake `bash -n`, `./llm-scheduler --wake-test | jq .`, and `./llm-usage-tests.sh`: ok.
