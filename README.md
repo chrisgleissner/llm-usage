@@ -1,5 +1,9 @@
 # llm-usage
 
+[![Build](https://github.com/chrisgleissner/llm-usage/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/chrisgleissner/llm-usage/actions/workflows/test.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey)](https://github.com/chrisgleissner/llm-usage/releases)
+
 Tiny Linux CLI for checking remaining Codex, Claude Code, and GitHub Copilot usage from one terminal command.
 
 `llm-usage` is a small Bash utility for developers who use multiple AI coding tools and want a quick local usage snapshot without opening several apps or dashboards.
