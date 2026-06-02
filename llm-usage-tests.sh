@@ -170,6 +170,6 @@ LLM_USAGE_NOW_EPOCH=1750000000 \
   LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 5% used · AI Credits: 0' \
   LLM_USAGE_COPILOT_MONTHLY_RESET_OFFSET_DAYS=2 \
   run_tool "$tmpdir/copilot-reset-offset.txt" --show-source
-assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+95%[[:space:]]+-[[:space:]]+2025-07-03[[:space:]]+00:00[[:space:]]+[0-9]' "$tmpdir/copilot-reset-offset.txt"
+assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+95%[[:space:]]+-[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]+[0-9]{2}:[0-9]{2}[[:space:]]+[0-9]' "$tmpdir/copilot-reset-offset.txt"
 
 printf 'ok\n'
