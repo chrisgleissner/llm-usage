@@ -1,11 +1,8 @@
 # llm-usage
 
-Tiny Linux CLI for showing remaining Codex, Claude Code, and GitHub Copilot usage.
+Tiny Linux CLI for checking remaining Codex, Claude Code, and GitHub Copilot usage from one terminal command.
 
-Small Linux Bash utility that reads local usage state where possible and prints a compact
-usage snapshot for Codex, Claude Code, and GitHub Copilot in one terminal table.
-
-## Example output
+`llm-usage` is a small Bash utility for developers who use multiple AI coding tools and want a quick local usage snapshot without opening several apps or dashboards.
 
 ```log
 Tool       Window        Remaining       Resets           Source
@@ -17,36 +14,23 @@ Claude     weekly            74% 2026-06-04 13:00 /home/chris/.cache/llm-usage/c
 Copilot    monthly           79% -                copilot cli
 ```
 
-## What it does
+## Features
 
-- Shows remaining usage for Codex, Claude Code, and GitHub Copilot.
-- Focuses on a quick local status check for developers using multiple AI coding tools.
-- Reads available local state and optionally queries the Anthropic usage endpoint when credentials are present.
-- Outputs a compact table focused on remaining percentages and an optional JSON output for tooling.
-- `--watch` renders the table in-place by replacing the previous view on each refresh (single-screen, no growing log), and prints `Last refreshed: YYYY-MM-DD HH:MM:SS`.
-- Percentages use terminal color for quick scanning (red → yellow → green by remaining usage).
-- Runs as a tiny executable script with no build step.
+* Shows remaining usage for Codex, Claude Code, and GitHub Copilot.
+* Reads local usage state where possible.
+* Can query Claude usage from the Anthropic API when suitable credentials are available.
+* Captures Copilot usage from the local Copilot CLI footer.
+* Prints a compact terminal table by default.
+* Supports JSON output for scripts and status integrations.
+* Supports watch mode with in-place refresh.
+* Uses terminal colours to make low remaining usage easy to spot.
+* Runs as a single executable script with no build step.
 
-## What it does not do
+## Install
 
-- It is not a billing dashboard.
-- It is not an official provider tool.
-- It does not manage subscriptions.
-- It does not change provider limits.
-- It does not send usage data to a third-party service.
-- It does not aim to support every LLM provider.
-- Linux-only for now.
+`llm-usage` is intended to live in `~/.local/bin`.
 
-## Installation
-
-The command is a single file intended for `~/.local/bin/llm-usage`.
-
-```bash
-cp llm-usage ~/.local/bin/llm-usage
-chmod +x ~/.local/bin/llm-usage
-```
-
-Recommended clone-based install:
+### Clone and install
 
 ```bash
 git clone https://github.com/chrisgleissner/llm-usage.git
@@ -54,15 +38,16 @@ cd llm-usage
 install -m 0755 llm-usage ~/.local/bin/llm-usage
 ```
 
-One-command install path (after publishing):
+### Install directly with curl
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/chrisgleissner/llm-usage/main/llm-usage -o ~/.local/bin/llm-usage && chmod +x ~/.local/bin/llm-usage
+mkdir -p ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/chrisgleissner/llm-usage/main/llm-usage \
+  -o ~/.local/bin/llm-usage
+chmod +x ~/.local/bin/llm-usage
 ```
 
 Make sure `~/.local/bin` is on your `PATH`.
-
-Verify:
 
 ```bash
 command -v llm-usage
@@ -81,60 +66,81 @@ llm-usage --statusline
 llm-usage --no-header
 ```
 
-Options:
+## Options
 
-- `--json`: print JSON.
-- `--watch SECONDS`/`-w SECONDS`: refresh every `SECONDS`.
-- `--show-copilot-credits`: include Copilot `ai-credits` row in table output and JSON.
-- `--statusline`: read Claude Code statusline JSON from stdin and cache it for `--statusline` mode.
-- `--no-header`: omit table headers.
-- `-h`, `--help`: show help.
+| Option                   | Description                                                             |
+| ------------------------ | ----------------------------------------------------------------------- |
+| `--json`                 | Print JSON instead of a table.                                          |
+| `--watch SECONDS`        | Refresh every `SECONDS`, replacing the previous table in-place.         |
+| `-w SECONDS`             | Short form of `--watch`.                                                |
+| `--show-copilot-credits` | Include the Copilot AI credits row in table and JSON output.            |
+| `--statusline`           | Read Claude Code statusline JSON from stdin and cache it for later use. |
+| `--no-header`            | Omit table headers.                                                     |
+| `-h`, `--help`           | Show help.                                                              |
+
+In watch mode, the table is redrawn in-place and includes a refresh timestamp:
+
+```log
+Last refreshed: 2026-06-02 13:52:18
+```
+
+## Data sources
+
+`llm-usage` combines several provider-specific sources:
+
+| Tool           | Source                                                                                    |
+| -------------- | ----------------------------------------------------------------------------------------- |
+| Codex          | Local session JSONL files under `~/.codex/sessions`.                                      |
+| Claude Code    | Local cache, local Claude project/session files, and optionally Anthropic usage API data. |
+| GitHub Copilot | Usage text shown by the local Copilot CLI footer.                                         |
+
+Claude cache files are stored under `~/.cache/llm-usage`.
 
 ## Dependencies
 
-- Bash
-- jq
-- curl
-- GNU coreutils (`find`, `sort`, `tail`, `date`)
-- `timeout` (usually in coreutils)
-- python3 or python
-- Copilot CLI (`copilot` or `github-copilot`) if you want live Copilot capture
-- Optional local state:
-  - `~/.codex/sessions`
-  - `~/.claude` credentials / session files
+Required:
 
-## Data sources and caveats
+* Bash
+* `jq`
+* `curl`
+* GNU coreutils, including `find`, `sort`, `tail`, `date`, and `timeout`
+* `python3` or `python`
 
-- Codex is read from local `.codex` session JSONL files under `~/.codex/sessions`.
-- Claude usage is read from local cache (`~/.cache/llm-usage/claude-status.json`) and local
-  project/session files under `~/.claude/projects`, with live API usage from `api.anthropic.com/api/oauth/usage` when credentials are available.
-- Copilot rows come from the Copilot CLI’s screen footer as observed by a local pseudo-tty capture.
+Optional:
 
-If any provider changes local file formats, API responses, authentication layout, or terminal output,
-any field may become unavailable or stale. This script is a practical local helper, not an authoritative
-billing or entitlement system.
+* Copilot CLI, available as `copilot` or `github-copilot`, for live Copilot usage capture
+* Local Codex state under `~/.codex/sessions`
+* Local Claude credentials and session files under `~/.claude`
+
+## Scope and limitations
+
+`llm-usage` is a practical local helper. It is not an official provider tool and it is not a billing dashboard.
+
+It does not:
+
+* manage subscriptions
+* change provider limits
+* guarantee authoritative billing or entitlement data
+* upload usage data to third-party services
+* aim to support every LLM provider
+* currently support non-Linux systems
+
+Provider formats can change. If Codex, Claude Code, Anthropic, GitHub Copilot, or their CLIs change local files, API responses, authentication layout, or terminal output, some fields may become unavailable or stale.
 
 ## Privacy
 
-llm-usage reads local Codex and Claude state under your home directory, may use Claude credentials to query
-Claude usage, and may invoke the GitHub Copilot CLI locally to capture its visible usage footer. It does not
-upload data anywhere other than provider API calls needed to fetch usage.
+`llm-usage` reads local Codex and Claude state from your home directory. It may use Claude credentials to query Anthropic usage, and it may invoke the Copilot CLI locally to capture the visible usage footer.
+
+It does not upload data anywhere other than direct provider API calls needed to fetch usage.
 
 ## Tests
-
-Run:
 
 ```bash
 ./llm-usage-tests.sh
 ```
 
-The tests are fixture-driven and validate table output, JSON output, missing Copilot data handling,
-timeout behavior, and Copilot isolation from Codex/Claude JSON structure.
+The tests are fixture-driven and cover table output, JSON output, missing Copilot data, timeout handling, and isolation between Copilot, Codex, and Claude parsing.
 
 ## License
 
 Apache License 2.0.
-
-## Status
-
-Small, intentionally lightweight CLI with one executable and one test script.
