@@ -17,11 +17,11 @@ assert_grep() {
   grep -Eq "$pattern" "$file" || fail "pattern not found: $pattern"
 }
 
-assert_no_grep() {
+assert_not_grep() {
   local pattern="$1"
   local file="$2"
-  if LC_ALL=C grep -Eq "$pattern" "$file"; then
-    fail "unexpected pattern found: $pattern"
+  if grep -Eq "$pattern" "$file"; then
+    fail "unexpected match: $pattern"
   fi
 }
 
@@ -68,30 +68,42 @@ watch_output="$tmpdir/watch-output.txt"
 
 LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 5% used · AI Credits: 0' \
   run_tool "$fixture_zero"
-assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+95%[[:space:]]+5(\.0)?%[[:space:]]+-[[:space:]]+copilot cli$' "$fixture_zero"
-assert_grep '^Copilot[[:space:]]+ai-credits[[:space:]]+unknown[[:space:]]+0[[:space:]]+-[[:space:]]+copilot cli$' "$fixture_zero"
+assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+95%[[:space:]]+-[[:space:]]+copilot cli$' "$fixture_zero"
+assert_not_grep '^Copilot[[:space:]]+ai-credits[[:space:]]' "$fixture_zero"
+
+LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 5% used · AI Credits: 0' \
+  run_tool "$tmpdir/fixture-zero-credits.txt" --show-copilot-credits
+assert_grep '^Copilot[[:space:]]+ai-credits[[:space:]]+0[[:space:]]+-[[:space:]]+copilot cli$' "$tmpdir/fixture-zero-credits.txt"
 
 LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 42% used · AI Credits: 17' \
   run_tool "$fixture_nonzero"
-assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+58%[[:space:]]+42(\.0)?%[[:space:]]+-[[:space:]]+copilot cli$' "$fixture_nonzero"
-assert_grep '^Copilot[[:space:]]+ai-credits[[:space:]]+unknown[[:space:]]+17[[:space:]]+-[[:space:]]+copilot cli$' "$fixture_nonzero"
+assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+58%[[:space:]]+-[[:space:]]+copilot cli$' "$fixture_nonzero"
+assert_not_grep '^Copilot[[:space:]]+ai-credits[[:space:]]' "$fixture_nonzero"
 
 LLM_USAGE_COPILOT_CAPTURE_TEXT='No footer here' \
   run_tool "$fixture_missing"
-assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+unavailable[[:space:]]+unavailable[[:space:]]+-[[:space:]]+copilot cli$' "$fixture_missing"
-assert_grep '^Copilot[[:space:]]+ai-credits[[:space:]]+unavailable[[:space:]]+unavailable[[:space:]]+-[[:space:]]+copilot cli$' "$fixture_missing"
+assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+unavailable[[:space:]]+-[[:space:]]+copilot cli$' "$fixture_missing"
+assert_not_grep '^Copilot[[:space:]]+ai-credits[[:space:]]' "$fixture_missing"
+LLM_USAGE_COPILOT_CAPTURE_TEXT='No footer here' \
+  run_tool "$tmpdir/fixture-missing-credits.txt" --show-copilot-credits
+assert_grep '^Copilot[[:space:]]+ai-credits[[:space:]]+unavailable[[:space:]]+-[[:space:]]+copilot cli$' "$tmpdir/fixture-missing-credits.txt"
 
 LLM_USAGE_COPILOT_CAPTURE_CMD='sleep 99' \
 LLM_USAGE_COPILOT_TIMEOUT=1 \
   run_tool "$fixture_timeout"
 assert_grep '^Codex[[:space:]]+5h' "$fixture_timeout"
 assert_grep '^Claude[[:space:]]+5h' "$fixture_timeout"
-assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+unavailable[[:space:]]+unavailable[[:space:]]+-[[:space:]]+copilot cli$' "$fixture_timeout"
+assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+unavailable[[:space:]]+-[[:space:]]+copilot cli$' "$fixture_timeout"
 
 LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 5% used · AI Credits: 0' \
   run_tool "$json_zero" --json
-jq -e '.copilot.monthly.remaining == 95 and .copilot.monthly.used == 5 and .copilot.ai_credits.used == 0' "$json_zero" >/dev/null \
+jq -e '.copilot.monthly.remaining == 95 and .copilot.monthly.used == 5 and ( .copilot.ai_credits | not )' "$json_zero" >/dev/null \
   || fail "unexpected Copilot JSON for zero-credits fixture"
+
+LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 5% used · AI Credits: 0' \
+  run_tool "$tmpdir/json-zero-credits.json" --json --show-copilot-credits
+jq -e '.copilot.monthly.remaining == 95 and .copilot.monthly.used == 5 and .copilot.ai_credits.used == 0' "$tmpdir/json-zero-credits.json" >/dev/null \
+  || fail "missing Copilot AI credits JSON with --show-copilot-credits"
 
 LLM_USAGE_COPILOT_CAPTURE_TEXT='No footer here' \
   run_tool "$json_missing" --json
@@ -114,8 +126,10 @@ jq -S '{codex,claude}' "$json_with_copilot" > "$tmpdir/with-copilot-cq.json"
 cmp -s "$tmpdir/baseline-cq.json" "$tmpdir/with-copilot-cq.json" \
   || fail "Codex/Claude JSON changed when Copilot rows were added"
 
-HOME="$HOME_FIXTURE" timeout 2s "$TOOL" --watch 0.5 > "$watch_output" || true
-assert_grep '^Last refreshed:' "$watch_output"
-assert_no_grep $'\\x1B' "$watch_output"
+LLM_USAGE_DISABLE_COPILOT=1 HOME="$HOME_FIXTURE" timeout 2s "$TOOL" --watch 0.5 > "$watch_output" || true
+assert_grep 'Last refreshed:' "$watch_output"
+if [[ "$(grep -c 'Last refreshed:' "$watch_output" || true)" -lt 1 ]]; then
+  fail "watch output did not include refresh timestamp"
+fi
 
 printf 'ok\n'

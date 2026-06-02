@@ -7,15 +7,14 @@ usage snapshot for Codex, Claude Code, and GitHub Copilot in one terminal table.
 
 ## Example output
 
-```
-Tool       Window        Remaining       Used Resets           Source
----------- ------------ ---------- ---------- ---------------- ----------------
-Codex      5h                  47%      53.0% 2026-06-02 13:49 ~/.codex/sessions
-Codex      weekly              59%      41.0% 2026-06-07 16:25 ~/.codex/sessions
-Claude     5h                   0%     100.0% 2026-06-02 13:20 api.anthropic.com/api/oauth/usage
-Claude     weekly              75%      25.0% 2026-06-04 13:00 api.anthropic.com/api/oauth/usage
-Copilot    monthly             80%        20% -                copilot cli
-Copilot    ai-credits      unknown          0 -                copilot cli
+```log
+Tool       Window        Remaining       Resets           Source
+---------- ------------ ---------- ---------------- ----------------
+Codex      5h                47% 2026-06-02 13:49 ~/.codex/sessions
+Codex      weekly            59% 2026-06-07 16:25 ~/.codex/sessions
+Claude     5h                94% 2026-06-02 18:20 /home/chris/.cache/llm-usage/claude-usage-api.json
+Claude     weekly            74% 2026-06-04 13:00 /home/chris/.cache/llm-usage/claude-usage-api.json
+Copilot    monthly           79% -                copilot cli
 ```
 
 ## What it does
@@ -23,8 +22,8 @@ Copilot    ai-credits      unknown          0 -                copilot cli
 - Shows remaining usage for Codex, Claude Code, and GitHub Copilot.
 - Focuses on a quick local status check for developers using multiple AI coding tools.
 - Reads available local state and optionally queries the Anthropic usage endpoint when credentials are present.
-- Outputs a human-friendly table by default and optional JSON output for tooling.
-- `--watch` now prefixes each refresh with `Last refreshed: YYYY-MM-DD HH:MM:SS` and appends new rows without clearing the screen.
+- Outputs a compact table focused on remaining percentages and an optional JSON output for tooling.
+- `--watch` renders the table in-place by replacing the previous view on each refresh (single-screen, no growing log), and prints `Last refreshed: YYYY-MM-DD HH:MM:SS`.
 - Percentages use terminal color for quick scanning (red → yellow → green by remaining usage).
 - Runs as a tiny executable script with no build step.
 
@@ -76,6 +75,8 @@ llm-usage
 llm-usage
 llm-usage --json
 llm-usage --watch 5
+llm-usage -w 5
+llm-usage --show-copilot-credits
 llm-usage --statusline
 llm-usage --no-header
 ```
@@ -83,7 +84,8 @@ llm-usage --no-header
 Options:
 
 - `--json`: print JSON.
-- `--watch SECONDS`: refresh every `SECONDS`.
+- `--watch SECONDS`/`-w SECONDS`: refresh every `SECONDS`.
+- `--show-copilot-credits`: include Copilot `ai-credits` row in table output and JSON.
 - `--statusline`: read Claude Code statusline JSON from stdin and cache it for `--statusline` mode.
 - `--no-header`: omit table headers.
 - `-h`, `--help`: show help.

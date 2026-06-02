@@ -24,6 +24,7 @@ WATCH_INTERVAL=0
 JSON_OUTPUT=0
 STATUSLINE_MODE=0
 NO_HEADER=0
+SHOW_COPILOT_CREDITS=0
 COLOR_ENABLED=0
 RED=''
 YELLOW=''
@@ -40,7 +41,7 @@ fi
 
 usage() {
   cat <<USAGE
-Usage: $APP_NAME [--json] [--watch SECONDS] [--statusline] [--no-header]
+Usage: $APP_NAME [--json] [--watch SECONDS] [--show-copilot-credits] [--statusline] [--no-header]
 
 Shows remaining percentage for:
   - Codex current session / 5-hour window
@@ -48,11 +49,12 @@ Shows remaining percentage for:
   - Claude Code current session / 5-hour window
   - Claude Code weekly / 7-day window
   - Copilot monthly usage
-  - Copilot AI credits
+  - Copilot AI credits (optional, with --show-copilot-credits)
 
 Options:
   --json              Emit JSON instead of a table.
-  --watch SECONDS     Refresh repeatedly.
+  -w, --watch SECONDS  Refresh repeatedly.
+  --show-copilot-credits  Show Copilot AI credits row.
   --statusline        Read Claude Code statusline JSON from stdin, cache it, print compact line.
   --no-header         Omit table header.
   -h, --help          Show this help.
@@ -69,9 +71,13 @@ need() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --json) JSON_OUTPUT=1; shift ;;
+    -w)
+      [[ $# -ge 2 ]] || { echo "error: -w requires seconds" >&2; exit 2; }
+      WATCH_INTERVAL="$2"; shift 2 ;;
     --watch)
       [[ $# -ge 2 ]] || { echo "error: --watch requires seconds" >&2; exit 2; }
       WATCH_INTERVAL="$2"; shift 2 ;;
+    --show-copilot-credits) SHOW_COPILOT_CREDITS=1; shift ;;
     --statusline) STATUSLINE_MODE=1; shift ;;
     --no-header) NO_HEADER=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -456,13 +462,22 @@ json_for_provider() {
 
 json_for_copilot() {
   local copilot_json="${1:-}"
+  local show_credits="${2:-0}"
   if [[ -z "$copilot_json" ]]; then
     jq -nc '{provider:"copilot", source:"copilot cli", available:false, reason:"unavailable"}'
   else
-    printf '%s\n' "$copilot_json" | jq -c '
-      if .available? == false then .
-      else . + {available: ((.monthly != null) or (.ai_credits != null))}
-      end'
+    if [[ "$show_credits" -eq 1 ]]; then
+      printf '%s\n' "$copilot_json" | jq -c '
+        if .available? == false then .
+        else . + {available: ((.monthly != null) or (.ai_credits != null))}
+        end'
+    else
+      printf '%s\n' "$copilot_json" | jq -c '
+        del(.ai_credits)
+        | if .available? == false then .
+        else . + {available: ((.monthly != null))}
+        end'
+    fi
   fi
 }
 
@@ -486,22 +501,34 @@ colorize_percent() {
   local integer="${numeric%.*}"
   [[ -z "$integer" ]] && integer="0"
 
-  if (( integer < 30 )); then
+  if (( integer < 10 )); then
     printf '%s%s%s' "$RED" "$value" "$RESET"
-  elif (( integer < 70 )); then
+  elif (( integer < 30 )); then
     printf '%s%s%s' "$YELLOW" "$value" "$RESET"
   else
     printf '%s%s%s' "$GREEN" "$value" "$RESET"
   fi
 }
 
+print_cell() {
+  local width="$1"
+  local text="$2"
+  local plain
+  plain=$(printf '%s' "$text" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g')
+  local pad=$((width - ${#plain}))
+  printf '%s' "$text"
+  if (( pad > 0 )); then
+    printf '%*s' "$pad" ''
+  fi
+}
+
 print_value_row() {
-  local provider="$1" window="$2" remaining="$3" used="$4" reset="$5" source="$6"
-  local remaining_colored used_colored
+  local provider="$1" window="$2" remaining="$3" reset="$4" source="$5"
+  local remaining_colored
   remaining_colored=$(colorize_percent "$remaining")
-  used_colored=$(colorize_percent "$used")
-  printf '%-10s %-12s %10s %10s %-16s %s\n' \
-    "$provider" "$window" "$remaining_colored" "$used_colored" "$reset" "$source"
+  printf '%-10s %-12s ' "$provider" "$window"
+  print_cell 10 "$remaining_colored"
+  printf ' %-16s %s\n' "$reset" "$source"
 }
 
 print_row() {
@@ -511,33 +538,36 @@ print_row() {
   [[ -n "$remaining" ]] || remaining="n/a"
   reset_text=$(fmt_reset "$reset")
   [[ -n "$reset_text" ]] || reset_text="n/a"
-  print_value_row "$provider" "$window" "$(fmt_pct "$remaining")%" "$(fmt_pct "${used:-}")%" "$reset_text" "$source"
+  print_value_row "$provider" "$window" "$(fmt_pct "$remaining")%" "$reset_text" "$source"
 }
 
 print_unavailable_rows() {
   local provider="$1"
-  print_value_row "$provider" "5h" "n/a" "n/a" "n/a" "no local data"
-  print_value_row "$provider" "weekly" "n/a" "n/a" "n/a" "no local data"
+  print_value_row "$provider" "5h" "n/a" "n/a" "no local data"
+  print_value_row "$provider" "weekly" "n/a" "n/a" "no local data"
 }
 
 print_copilot_rows() {
   local copilot_json="$1"
-  local source monthly_used monthly_remaining ai_credits
+  local source monthly_remaining ai_credits
 
   if [[ -z "$copilot_json" ]]; then
-    print_value_row "Copilot" "monthly" "unavailable" "unavailable" "-" "copilot cli"
-    print_value_row "Copilot" "ai-credits" "unavailable" "unavailable" "-" "copilot cli"
+    print_value_row "Copilot" "monthly" "unavailable" "-" "copilot cli"
+    if [[ "$SHOW_COPILOT_CREDITS" -eq 1 ]]; then
+      print_value_row "Copilot" "ai-credits" "unavailable" "-" "copilot cli"
+    fi
     return
   fi
 
   source=$(jq -r '.source // "copilot cli"' <<<"$copilot_json")
   if [[ "$(jq -r 'if .available? == false then "false" else "true" end' <<<"$copilot_json")" == "false" ]]; then
-    print_value_row "Copilot" "monthly" "unavailable" "unavailable" "-" "$source"
-    print_value_row "Copilot" "ai-credits" "unavailable" "unavailable" "-" "$source"
+    print_value_row "Copilot" "monthly" "unavailable" "-" "$source"
+    if [[ "$SHOW_COPILOT_CREDITS" -eq 1 ]]; then
+      print_value_row "Copilot" "ai-credits" "unavailable" "-" "$source"
+    fi
     return
   fi
 
-  monthly_used=$(jq -r '.monthly.used // empty' <<<"$copilot_json")
   monthly_remaining=$(jq -r '.monthly.remaining // empty' <<<"$copilot_json")
   ai_credits=$(jq -r '.ai_credits.used // empty' <<<"$copilot_json")
 
@@ -546,15 +576,12 @@ print_copilot_rows() {
   else
     monthly_remaining="unknown"
   fi
-  if [[ -n "$monthly_used" ]]; then
-    monthly_used="$(fmt_pct "$monthly_used")%"
-  else
-    monthly_used="unknown"
-  fi
-  [[ -n "$ai_credits" ]] || ai_credits="unknown"
 
-  print_value_row "Copilot" "monthly" "$monthly_remaining" "$monthly_used" "-" "$source"
-  print_value_row "Copilot" "ai-credits" "unknown" "$ai_credits" "-" "$source"
+  print_value_row "Copilot" "monthly" "$monthly_remaining" "-" "$source"
+  if [[ "$SHOW_COPILOT_CREDITS" -eq 1 ]]; then
+    [[ -n "$ai_credits" ]] || ai_credits="unknown"
+    print_value_row "Copilot" "ai-credits" "$ai_credits" "-" "$source"
+  fi
 }
 
 render_once() {
@@ -566,15 +593,15 @@ render_once() {
   if [[ "$JSON_OUTPUT" -eq 1 ]]; then
     codex_json=$(json_for_provider "$codex" codex)
     claude_json=$(json_for_provider "$claude" claude)
-    copilot_json=$(json_for_copilot "$copilot")
+    copilot_json=$(json_for_copilot "$copilot" "$SHOW_COPILOT_CREDITS")
     jq -nc --arg generated_at "$(date -Is)" --argjson codex "$codex_json" --argjson claude "$claude_json" --argjson copilot "$copilot_json" \
       '{generated_at:$generated_at, codex:$codex, claude:$claude, copilot:$copilot}'
     return
   fi
 
   if [[ "$NO_HEADER" -eq 0 ]]; then
-    printf '%-10s %-12s %10s %10s %-16s %s\n' "Tool" "Window" "Remaining" "Used" "Resets" "Source"
-    printf '%-10s %-12s %10s %10s %-16s %s\n' "----------" "------------" "----------" "----------" "----------------" "----------------"
+    printf '%-10s %-12s %10s %-16s %s\n' "Tool" "Window" "Remaining" "Resets" "Source"
+    printf '%-10s %-12s %10s %-16s %s\n' "----------" "------------" "----------" "----------------" "----------------"
   fi
 
   if [[ -n "$codex" ]]; then
@@ -612,15 +639,29 @@ statusline_mode() {
   printf '%s\n' "$out"
 }
 
+render_once_frame() {
+  local frame_now="$1"
+  {
+    printf 'Last refreshed: %s\n' "$frame_now"
+    render_once
+  }
+}
+
 if [[ "$STATUSLINE_MODE" -eq 1 ]]; then
   statusline_mode
   exit 0
 fi
 
 if [[ "$WATCH_INTERVAL" != "0" ]]; then
+  watch_frame=""
+  refresh_time=""
   while true; do
-    printf 'Last refreshed: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-    render_once
+    refresh_time="$(date '+%Y-%m-%d %H:%M:%S')"
+    watch_frame="$(render_once_frame "$refresh_time")"
+    if [[ -t 1 ]]; then
+      printf '\033[2J\033[H'
+    fi
+    printf '%s' "$watch_frame"
     sleep "$WATCH_INTERVAL"
   done
 else
