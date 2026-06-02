@@ -5,3 +5,4 @@
 - 2026-06-02 13:58 UTC+1: Replaced tests with fixture-driven local-test script and created README, LICENSE, NOTICE, .gitignore, and `.github/workflows/test.yml`.
 - 2026-06-02 14:04 UTC+1: Verified script/test syntax and fixture-driven tests; recorded shellcheck skipped (not installed).
 - 2026-06-02 14:05 UTC+1: Linked `/home/chris/.local/bin/llm-usage` to `/home/chris/dev/llm-usage/llm-usage` and initialized a `main` git repository.
+- 2026-06-02 14:10 UTC+1: Updated `--watch` to avoid screen clearing and print `Last refreshed` on each refresh; added fixture-driven test coverage.

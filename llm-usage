@@ -574,7 +574,7 @@ fi
 
 if [[ "$WATCH_INTERVAL" != "0" ]]; then
   while true; do
-    clear 2>/dev/null || true
+    printf 'Last refreshed: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
     render_once
     sleep "$WATCH_INTERVAL"
   done

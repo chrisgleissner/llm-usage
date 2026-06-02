@@ -17,6 +17,14 @@ assert_grep() {
   grep -Eq "$pattern" "$file" || fail "pattern not found: $pattern"
 }
 
+assert_no_grep() {
+  local pattern="$1"
+  local file="$2"
+  if LC_ALL=C grep -Eq "$pattern" "$file"; then
+    fail "unexpected pattern found: $pattern"
+  fi
+}
+
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
@@ -56,6 +64,7 @@ json_missing="$tmpdir/fixture-missing.json"
 json_timeout="$tmpdir/fixture-timeout.json"
 json_baseline="$tmpdir/baseline.json"
 json_with_copilot="$tmpdir/with-copilot.json"
+watch_output="$tmpdir/watch-output.txt"
 
 LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 5% used · AI Credits: 0' \
   run_tool "$fixture_zero"
@@ -104,5 +113,9 @@ jq -S '{codex,claude}' "$json_baseline" > "$tmpdir/baseline-cq.json"
 jq -S '{codex,claude}' "$json_with_copilot" > "$tmpdir/with-copilot-cq.json"
 cmp -s "$tmpdir/baseline-cq.json" "$tmpdir/with-copilot-cq.json" \
   || fail "Codex/Claude JSON changed when Copilot rows were added"
+
+HOME="$HOME_FIXTURE" timeout 2s "$TOOL" --watch 0.5 > "$watch_output" || true
+assert_grep '^Last refreshed:' "$watch_output"
+assert_no_grep $'\\x1B' "$watch_output"
 
 printf 'ok\n'
