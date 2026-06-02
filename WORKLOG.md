@@ -24,3 +24,7 @@ llm-scheduler worklog
 - Ran live wake test with transient user systemd timer and `systemctl suspend`: system entered S3 at `2026-06-02 22:01:10` and resumed at `22:02:25`.
 - Wake Copilot scheduler service initially saw Copilot capture timeout at `22:02:35`, then polled again, submitted prompt, and received `ok` at `22:03:45`.
 - Ran post-wake `bash -n`, `./llm-scheduler --wake-test | jq .`, and `./llm-usage-tests.sh`: ok.
+- Added `llm-scheduler --suspend-until-ready` to schedule a resumed scheduler invocation with a WakeSystem timer, then suspend instead of polling.
+- Fixed scheduler reset parsing for Claude API timestamps with fractional seconds and `+00:00` offset.
+- Added regression coverage for `--suspend-until-ready` timer arming and Claude offset reset parsing.
+- Dry-ran requested Claude 5h handover schedule; reset derived as epoch `1780438801` / local `2026-06-02 23:20:01`.

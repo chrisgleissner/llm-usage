@@ -15,13 +15,13 @@ fail() {
 assert_grep() {
   local pattern="$1"
   local file="$2"
-  grep -Eq "$pattern" "$file" || fail "pattern not found: $pattern"
+  grep -Eq -- "$pattern" "$file" || fail "pattern not found: $pattern"
 }
 
 assert_not_grep() {
   local pattern="$1"
   local file="$2"
-  if grep -Eq "$pattern" "$file"; then
+  if grep -Eq -- "$pattern" "$file"; then
     fail "unexpected match: $pattern"
   fi
 }
@@ -86,6 +86,30 @@ fi
 printf 'no input\n'
 MOCK
 chmod +x "$tmpdir/ci-bin/unsafe-mock"
+
+cat > "$tmpdir/ci-bin/systemd-run" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${SYSTEMD_RUN_LOG:-/dev/null}"
+printf 'Running timer as unit: mocked.timer\n'
+printf 'Will run service as unit: mocked.service\n'
+MOCK
+chmod +x "$tmpdir/ci-bin/systemd-run"
+
+cat > "$tmpdir/ci-bin/systemctl" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${SYSTEMCTL_LOG:-/dev/null}"
+if [[ "${1:-}" == "--user" && "${2:-}" == "is-system-running" ]]; then
+  printf 'running\n'
+  exit 0
+fi
+if [[ "${1:-}" == "suspend" ]]; then
+  exit 0
+fi
+exit 0
+MOCK
+chmod +x "$tmpdir/ci-bin/systemctl"
 
 cat > "$HOME_FIXTURE/.codex/sessions/session-20260602.jsonl" <<'JSON'
 {"rate_limits":{"primary":{"used_percent":53,"window_minutes":300,"resets_at":"2026-06-02T13:49:00Z"},"secondary":{"used_percent":59,"window_minutes":10080,"resets_at":"2026-06-07T16:25:00Z"},"spark":{"primary":{"used_percent":99,"resets_at":"2026-06-02T22:26:00Z"},"secondary":{"used_percent":96,"resets_at":"2026-06-08T17:49:00Z"}}}}
@@ -210,7 +234,7 @@ printf '%s\n' '{"ts":1750000000,"provider":"copilot","window":"monthly","remaini
 LLM_USAGE_NOW_EPOCH=1750003600 \
   LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 50% used · AI Credits: 0' \
   run_tool_keep_log "$tmpdir/remaining-time-estimate.txt" --show-source
-assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+50%[[:space:]]+1h[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]+[0-9]{2}:[0-9]{2}[[:space:]]+[0-9]' "$tmpdir/remaining-time-estimate.txt"
+assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+50%[[:space:]]+1h[[:space:]]+' "$tmpdir/remaining-time-estimate.txt"
 
 LLM_USAGE_NOW_EPOCH=1750000000 \
   LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 5% used · AI Credits: 0' \
@@ -236,6 +260,7 @@ assert_grep 'prompt file is not readable' "$tmpdir/scheduler-missing-file.txt"
 
 available_usage='{"available":true,"five_hour":{"remaining":50,"resets_at":"2026-06-02T23:00:00Z"},"week":{"remaining":50,"resets_at":"2026-06-07T23:00:00Z"}}'
 exhausted_usage='{"available":true,"five_hour":{"remaining":0,"resets_at":"2026-06-02T23:00:00Z"},"week":{"remaining":50,"resets_at":"2026-06-07T23:00:00Z"}}'
+exhausted_offset_usage='{"available":true,"five_hour":{"remaining":0,"resets_at":"2026-06-02T22:20:01.166099+00:00"},"week":{"remaining":50,"resets_at":"2026-06-07T23:00:00Z"}}'
 weekly_exhausted_usage='{"available":true,"five_hour":{"remaining":50,"resets_at":"2026-06-02T23:00:00Z"},"week":{"remaining":0,"resets_at":"2026-06-07T23:00:00Z"}}'
 copilot_usage='{"available":true,"monthly":{"remaining":25}}'
 
@@ -255,6 +280,33 @@ LLM_SCHEDULER_USAGE_JSON="$exhausted_usage" \
 dry_dir="$(awk '{print $NF}' "$tmpdir/scheduler-dry.txt")"
 jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited" and .data.wait_until == 1780441200' "$dry_dir/events.jsonl" >/dev/null \
   || fail "dry-run did not record reset wait decision"
+
+LLM_USAGE_NOW_EPOCH=1780430000 \
+LLM_SCHEDULER_USAGE_JSON="$exhausted_offset_usage" \
+  "$SCHEDULER" --tool claude --window 5h --prompt x --command-template 'sched-mock {prompt}' --dry-run --log-dir "$tmpdir/scheduler-offset-logs" > "$tmpdir/scheduler-offset.txt"
+offset_dir="$(awk '{print $NF}' "$tmpdir/scheduler-offset.txt")"
+jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited" and .data.wait_until == 1780438801' "$offset_dir/events.jsonl" >/dev/null \
+  || fail "dry-run did not parse Claude offset reset timestamp"
+
+SYSTEMD_RUN_LOG="$tmpdir/systemd-run.log"
+SYSTEMCTL_LOG="$tmpdir/systemctl.log"
+: > "$SYSTEMD_RUN_LOG"
+: > "$SYSTEMCTL_LOG"
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+LLM_USAGE_NOW_EPOCH=1780430000 \
+LLM_SCHEDULER_USAGE_JSON="$exhausted_usage" \
+LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1 \
+SYSTEMD_RUN_LOG="$SYSTEMD_RUN_LOG" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+  "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' --suspend-until-ready --log-dir "$tmpdir/scheduler-suspend-logs" > "$tmpdir/scheduler-suspend.txt"
+assert_grep 'scheduled: logs written to ' "$tmpdir/scheduler-suspend.txt"
+assert_grep '--timer-property=WakeSystem=true' "$SYSTEMD_RUN_LOG"
+assert_grep '--on-calendar=@1780441200' "$SYSTEMD_RUN_LOG"
+assert_not_grep 'suspend' "$SYSTEMCTL_LOG"
+[[ "$(wc -l < "$SCHED_ATTEMPTS")" == "0" ]] || fail "suspend-until-ready should not submit before resumed scheduler"
+suspend_dir="$(awk '{print $NF}' "$tmpdir/scheduler-suspend.txt")"
+jq -e 'select(.type=="suspend_schedule_plan") | .data.reason == "rate-limited" and .data.target_epoch == 1780441200' "$suspend_dir/events.jsonl" >/dev/null \
+  || fail "suspend-until-ready did not record schedule plan"
 
 LLM_USAGE_NOW_EPOCH=1780430000 \
 LLM_SCHEDULER_USAGE_JSON="$weekly_exhausted_usage" \

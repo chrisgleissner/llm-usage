@@ -32,6 +32,7 @@ LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/llm-scheduler/logs"
 DRY_RUN=0
 WAKE=0
 WAKE_TEST=0
+SUSPEND_UNTIL_READY=0
 
 RUN_DIR=""
 TEXT_LOG=""
@@ -52,6 +53,7 @@ Examples:
   llm-scheduler --tool codex --prompt-file task.md --at "23:05"
   llm-scheduler --tool codex --prompt-file task.md --tmux llm-work
   llm-scheduler --tool codex --prompt-file task.md --wake
+  llm-scheduler --tool claude --prompt-file task.md --window 5h --suspend-until-ready
   llm-scheduler --tool codex --prompt-file task.md --dry-run
 
 Options:
@@ -73,6 +75,8 @@ Options:
   --log-dir DIR               Log directory (default: ~/.cache/llm-scheduler/logs).
   --dry-run                   Resolve state and command plan without submitting.
   --wake                      Best-effort wake scheduling diagnostics/logging.
+  --suspend-until-ready       Arm a wake timer for the next reset/not-before time,
+                              suspend now, and run this scheduler after wake.
   --wake-test                 Print wake capability diagnostics and exit.
   -h, --help                  Show this help.
 USAGE
@@ -128,7 +132,8 @@ safe_args_json() {
     --argjson auto_confirm "$AUTO_CONFIRM" \
     --argjson dry_run "$DRY_RUN" \
     --argjson wake "$WAKE" \
-    '{tool:$tool,window:$window,min_remaining:($min_remaining|tonumber),poll_interval:($poll_interval|tonumber),retry_delays:$retry_delays,cwd:$cwd,mode:$mode,tmux:$tmux,prompt_source:$prompt_source,log_dir:$log_dir,auto_confirm:$auto_confirm,dry_run:$dry_run,wake:$wake}'
+    --argjson suspend_until_ready "$SUSPEND_UNTIL_READY" \
+    '{tool:$tool,window:$window,min_remaining:($min_remaining|tonumber),poll_interval:($poll_interval|tonumber),retry_delays:$retry_delays,cwd:$cwd,mode:$mode,tmux:$tmux,prompt_source:$prompt_source,log_dir:$log_dir,auto_confirm:$auto_confirm,dry_run:$dry_run,wake:$wake,suspend_until_ready:$suspend_until_ready}'
 }
 
 parse_args() {
@@ -150,9 +155,10 @@ parse_args() {
       --auto-confirm) AUTO_CONFIRM=1; shift ;;
       --no-auto-confirm) AUTO_CONFIRM=0; shift ;;
       --log-dir) [[ $# -ge 2 ]] || { err "--log-dir requires a directory"; exit 2; }; LOG_DIR="$2"; shift 2 ;;
-      --dry-run) DRY_RUN=1; shift ;;
-      --wake) WAKE=1; shift ;;
-      --wake-test) WAKE_TEST=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --wake) WAKE=1; shift ;;
+    --suspend-until-ready) SUSPEND_UNTIL_READY=1; WAKE=1; shift ;;
+    --wake-test) WAKE_TEST=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) err "unknown option: $1"; usage >&2; exit 2 ;;
     esac
@@ -282,7 +288,8 @@ usage_decision() {
         if $r == null then null
         elif ($r|type) == "number" then ($r|floor)
         elif ($r|test("^[0-9]+(\\.[0-9]+)?$")) then ($r|tonumber|floor)
-        elif ($r|type) == "string" then (($r | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601?) // null)
+        elif ($r|type) == "string" then
+          (($r | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | sub("-00:00$"; "Z") | fromdateiso8601?) // null)
         else null end;
       def win($name; $obj):
         if $obj == null then empty
@@ -605,6 +612,110 @@ log_wake_plan() {
   fi
 }
 
+scheduler_resume_argv_json() {
+  local auto_flag mode_flag retry_parts=()
+  if (( AUTO_CONFIRM == 1 )); then
+    auto_flag="--auto-confirm"
+  else
+    auto_flag="--no-auto-confirm"
+  fi
+  if [[ "$EXEC_MODE" == "tmux" ]]; then
+    mode_flag="--tmux"
+  else
+    mode_flag="--fresh"
+  fi
+  if [[ -n "$RETRY_DELAYS" ]]; then
+    retry_parts=(--retry-delays "$RETRY_DELAYS")
+  else
+    retry_parts=(--no-retry)
+  fi
+
+  local args=(
+    "$SCRIPT_PATH"
+    --tool "$TOOL"
+    --prompt-file "$RUN_DIR/prompt.txt"
+    --window "$WINDOW"
+    --min-remaining "$MIN_REMAINING"
+    --poll-interval "$POLL_INTERVAL"
+    --cwd "$CWD"
+    "$auto_flag"
+    --log-dir "$LOG_DIR"
+  )
+  args+=("${retry_parts[@]}")
+  if [[ "$mode_flag" == "--tmux" ]]; then
+    args+=(--tmux "$TMUX_TARGET")
+  else
+    args+=(--fresh)
+  fi
+  if [[ -n "$COMMAND_TEMPLATE" ]]; then
+    args+=(--command-template "$COMMAND_TEMPLATE")
+  fi
+
+  printf '%s\0' "${args[@]}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.buffer.read().decode().split("\0")[:-1]))'
+}
+
+schedule_resume_and_suspend() {
+  local target_epoch="$1"
+  local reason="$2"
+  local unit output status argv_json command_line env_path
+
+  if ! have_cmd systemd-run; then
+    log_text "suspend-until-ready unavailable: systemd-run missing"
+    log_event "suspend_schedule_failed" '{"reason":"missing-systemd-run"}'
+    return 1
+  fi
+  if ! have_cmd systemctl; then
+    log_text "suspend-until-ready unavailable: systemctl missing"
+    log_event "suspend_schedule_failed" '{"reason":"missing-systemctl"}'
+    return 1
+  fi
+
+  unit="llm-scheduler-resume-${TOOL}-$(date +%s)"
+  argv_json="$(scheduler_resume_argv_json)"
+  command_line="$(ARGV_JSON="$argv_json" python3 - <<'PY'
+import json
+import os
+import shlex
+
+argv = json.loads(os.environ["ARGV_JSON"])
+print(" ".join(shlex.quote(x) for x in argv))
+PY
+)"
+  env_path="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+
+  log_text "suspend-until-ready scheduling unit=$unit target=$target_epoch reason=$reason"
+  log_event "suspend_schedule_plan" "$(jq -nc --arg unit "$unit" --arg reason "$reason" --argjson target_epoch "$target_epoch" --argjson argv "$argv_json" '{unit:$unit,reason:$reason,target_epoch:$target_epoch,argv:$argv}')"
+
+  if (( DRY_RUN == 1 )); then
+    log_text "dry-run suspend-until-ready command: systemd-run --user --unit=$unit --on-calendar=@$target_epoch --timer-property=WakeSystem=true --setenv=PATH=... /bin/bash -lc '$command_line'"
+    log_event "suspend_schedule_dry_run" "$(jq -nc --arg unit "$unit" --arg command "$command_line" --argjson target_epoch "$target_epoch" '{unit:$unit,target_epoch:$target_epoch,command:$command}')"
+    return 0
+  fi
+
+  set +e
+  output="$(systemd-run --user --unit="$unit" --on-calendar="@$target_epoch" --timer-property=WakeSystem=true --setenv="PATH=$env_path" --working-directory="$CWD" /bin/bash -lc "$command_line" 2>&1)"
+  status=$?
+  set -e
+
+  log_text "suspend-until-ready systemd-run status=$status output=$output"
+  log_event "suspend_schedule_attempt" "$(jq -nc --arg unit "$unit" --argjson status "$status" --arg output "$output" --argjson target_epoch "$target_epoch" '{unit:$unit,status:$status,output:$output,target_epoch:$target_epoch}')"
+  if (( status != 0 )); then
+    return 1
+  fi
+
+  if [[ "${LLM_SCHEDULER_NO_ACTUAL_SUSPEND:-0}" == "1" ]]; then
+    log_text "suspend skipped by LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1"
+    log_event "suspend_skipped" '{"reason":"env"}'
+    printf 'scheduled: logs written to %s\n' "$RUN_DIR"
+    return 0
+  fi
+
+  log_text "systemctl suspend requested"
+  sync
+  systemctl suspend
+  printf 'scheduled: logs written to %s\n' "$RUN_DIR"
+}
+
 wait_until_usable() {
   local not_before snapshot decision usable wait_until reason now target
   not_before="$(parse_not_before_epoch)"
@@ -614,6 +725,11 @@ wait_until_usable() {
       log_text "not-before gate active until $not_before"
       log_event "wait_decision" "$(jq -nc --arg reason "not-before" --argjson wait_until "$not_before" '{reason:$reason,wait_until:$wait_until}')"
       log_wake_plan "$not_before"
+      if (( SUSPEND_UNTIL_READY == 1 )); then
+        schedule_resume_and_suspend "$not_before" "not-before"
+        log_event "final" '{"status":"scheduled"}'
+        exit 0
+      fi
       if (( DRY_RUN == 1 )); then
         return 0
       fi
@@ -633,6 +749,11 @@ wait_until_usable() {
     fi
     target="${wait_until:-$(( $(now_epoch) + POLL_INTERVAL ))}"
     log_wake_plan "$target"
+    if (( SUSPEND_UNTIL_READY == 1 )); then
+      schedule_resume_and_suspend "$target" "$reason"
+      log_event "final" '{"status":"scheduled"}'
+      exit 0
+    fi
     if (( DRY_RUN == 1 )); then
       return 0
     fi

@@ -1,4 +1,4 @@
-# llm-usage
+# llm-tools
 
 [![Build](https://github.com/chrisgleissner/llm-tools/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/chrisgleissner/llm-tools/actions/workflows/test.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
@@ -70,6 +70,7 @@ llm-scheduler --tool copilot --prompt-file task.md --retry-delays 60,180,600
 llm-scheduler --tool codex --prompt-file task.md --at "23:05"
 llm-scheduler --tool codex --prompt-file task.md --tmux llm-work
 llm-scheduler --tool codex --prompt-file task.md --wake
+llm-scheduler --tool claude --prompt-file task.md --window 5h --suspend-until-ready
 llm-scheduler --tool codex --prompt-file task.md --dry-run
 ```
 
@@ -94,7 +95,14 @@ Scheduler options:
 - `--log-dir DIR` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-scheduler/logs`.
 - `--dry-run` resolves usage state, timing, command plan, and logs without submitting.
 - `--wake` enables best-effort wake scheduling.
+- `--suspend-until-ready` arms a transient user systemd timer with `WakeSystem=true` for the next reset/not-before time, suspends the machine, and runs `llm-scheduler` again after wake. This is useful when you want the desktop to sleep until a provider window resets instead of keeping a polling process active.
 - `--wake-test` prints wake capability diagnostics without scheduling work.
+
+Example for a Claude 5-hour reset:
+
+```bash
+llm-scheduler --tool claude --window 5h --prompt-file task.md --suspend-until-ready
+```
 
 Default provider adapters:
 
@@ -131,6 +139,8 @@ The scheduler logs normalized arguments, prompt source, prompt SHA-256, full pro
 ## Wake Limitations
 
 `llm-scheduler --wake` is best effort. It prefers a transient user `systemd-run` timer with `WakeSystem=true` when available and logs an `rtcwake` fallback command that the user can run manually if privileges are required.
+
+`llm-scheduler --suspend-until-ready` uses the same systemd wake timer mechanism, but schedules a resumed scheduler invocation and then calls `systemctl suspend` after the timer is accepted. If the machine suspends later by itself, the already-armed timer can still wake it for the scheduled run.
 
 Wake from suspend depends on firmware/BIOS settings, motherboard RTC support, kernel support, systemd user timers, and power state. The tool does not modify BIOS/UEFI settings and does not silently require `sudo`.
 
