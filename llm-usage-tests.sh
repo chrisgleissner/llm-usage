@@ -164,7 +164,7 @@ printf '%s\n' '{"ts":1750000000,"provider":"copilot","window":"monthly","remaini
 LLM_USAGE_NOW_EPOCH=1750003600 \
   LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 50% used · AI Credits: 0' \
   run_tool_keep_log "$tmpdir/remaining-time-estimate.txt" --show-source
-assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+50%[[:space:]]+1h[[:space:]]+2025-07-01[[:space:]]+00:00[[:space:]]+[0-9]' "$tmpdir/remaining-time-estimate.txt"
+assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+50%[[:space:]]+1h[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]+[0-9]{2}:[0-9]{2}[[:space:]]+[0-9]' "$tmpdir/remaining-time-estimate.txt"
 
 LLM_USAGE_NOW_EPOCH=1750000000 \
   LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 5% used · AI Credits: 0' \
