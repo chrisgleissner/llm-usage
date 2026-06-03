@@ -357,6 +357,63 @@ LLM_SCHEDULER_USAGE_JSON="$copilot_usage" \
   "$SCHEDULER" --tool copilot --prompt x --command-template 'sched-mock {prompt}' --retry-delays 0,0 --log-dir "$tmpdir/scheduler-retry-success-logs" > "$tmpdir/scheduler-retry-success.txt"
 [[ "$(wc -l < "$SCHED_ATTEMPTS")" == "2" ]] || fail "retry success did not stop after successful retry"
 
+# --max-unavailable-wait validation
+expect_fail "$tmpdir/scheduler-bad-unavail.txt" "$SCHEDULER" --tool codex --prompt x --max-unavailable-wait nope
+assert_grep 'max-unavailable-wait' "$tmpdir/scheduler-bad-unavail.txt"
+
+# Undeterminable usage (no measurable quota) must not block forever: after the
+# bound elapses the scheduler launches optimistically. Real clock here so the
+# elapsed-time bound can trip (now_epoch is not pinned).
+unavailable_usage='{"available":false}'
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+LLM_SCHEDULER_USAGE_JSON="$unavailable_usage" \
+  SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+  "$SCHEDULER" --tool claude --prompt x --command-template 'sched-mock {prompt}' \
+  --max-unavailable-wait 1 --poll-interval 1 --no-retry \
+  --log-dir "$tmpdir/scheduler-unavail-logs" > "$tmpdir/scheduler-unavail.txt"
+[[ "$(wc -l < "$SCHED_ATTEMPTS")" == "1" ]] || fail "undeterminable usage did not proceed optimistically and submit once"
+unavail_dir="$(awk '{print $NF}' "$tmpdir/scheduler-unavail.txt")"
+jq -e 'select(.type=="optimistic_proceed") | .data.reason == "unavailable"' "$unavail_dir/events.jsonl" >/dev/null \
+  || fail "undeterminable usage did not log optimistic_proceed"
+
+# Suspend-until-ready + undeterminable usage must proceed now (no real reset
+# epoch to wake for) instead of churning suspend/wake cycles. max-unavailable-wait
+# 0 disables the time bound, so this exercises the suspend-mode branch directly
+# without depending on wall-clock elapsed time.
+SYSTEMD_RUN_LOG="$tmpdir/systemd-run-unavail.log"
+SYSTEMCTL_LOG="$tmpdir/systemctl-unavail.log"
+: > "$SYSTEMD_RUN_LOG"
+: > "$SYSTEMCTL_LOG"
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+LLM_SCHEDULER_USAGE_JSON="$unavailable_usage" \
+LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1 \
+SYSTEMD_RUN_LOG="$SYSTEMD_RUN_LOG" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+  "$SCHEDULER" --tool claude --prompt x --command-template 'sched-mock {prompt}' \
+  --suspend-until-ready --max-unavailable-wait 0 --poll-interval 1 --no-retry \
+  --log-dir "$tmpdir/scheduler-unavail-suspend-logs" > "$tmpdir/scheduler-unavail-suspend.txt"
+[[ "$(wc -l < "$SCHED_ATTEMPTS")" == "1" ]] || fail "suspend-mode undeterminable usage did not proceed optimistically and submit once"
+assert_not_grep 'WakeSystem=true' "$SYSTEMD_RUN_LOG"
+assert_not_grep 'suspend' "$SYSTEMCTL_LOG"
+unavail_suspend_dir="$(awk '{print $NF}' "$tmpdir/scheduler-unavail-suspend.txt")"
+jq -e 'select(.type=="optimistic_proceed") | .data.suspend_mode == true' "$unavail_suspend_dir/events.jsonl" >/dev/null \
+  || fail "suspend-mode undeterminable usage did not log optimistic_proceed"
+
+# A known rate-limit (real reset epoch) must NOT be treated as undeterminable:
+# it waits precisely and never logs optimistic_proceed.
+LLM_USAGE_NOW_EPOCH=1780430000 \
+LLM_SCHEDULER_USAGE_JSON="$exhausted_usage" \
+  "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
+  --max-unavailable-wait 1 --dry-run --log-dir "$tmpdir/scheduler-ratelimit-excl-logs" > "$tmpdir/scheduler-ratelimit-excl.txt"
+ratelimit_excl_dir="$(awk '{print $NF}' "$tmpdir/scheduler-ratelimit-excl.txt")"
+jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited" and .data.wait_until == 1780441200' "$ratelimit_excl_dir/events.jsonl" >/dev/null \
+  || fail "known rate-limit did not record precise reset wait"
+if jq -e 'select(.type=="optimistic_proceed")' "$ratelimit_excl_dir/events.jsonl" >/dev/null; then
+  fail "known rate-limit must not proceed optimistically"
+fi
+
 prompt_file="$tmpdir/special prompt.txt"
 printf 'line one\nline two with ; $HOME and spaces\n' > "$prompt_file"
 : > "$SCHED_CAPTURE"

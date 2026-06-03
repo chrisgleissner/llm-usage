@@ -86,6 +86,7 @@ Scheduler options:
 - `--window auto|5h|weekly|monthly` chooses usage windows. `auto` checks all known Codex/Claude limiting windows and Copilot monthly usage.
 - `--min-remaining PERCENT` defaults to `1`.
 - `--poll-interval SECONDS` defaults to `60`.
+- `--max-unavailable-wait SECONDS` defaults to `900`. When usage data cannot be measured (no network, a transient API failure, or inconclusive/unsupported data — common right after resume-from-suspend), the scheduler keeps polling only up to this long, then launches optimistically and lets the tool's own rate-limit handling and `--retry-delays` take over. `0` waits forever. A known rate-limit with a real reset time is excluded and always waits for that reset.
 - `--retry-delays LIST` defaults to `60,180,600`; `--no-retry` disables retries.
 - `--cwd DIR` sets the target CLI working directory.
 - `--fresh` launches a fresh foreground CLI process and is the default.
@@ -156,7 +157,7 @@ llm-scheduler --wake-test
 
 - These tools can only use local data and local authenticated CLIs.
 - They are not official billing dashboards.
-- Missing or inconclusive provider data degrades to `-`, `unknown`, or `unavailable`; the scheduler polls conservatively instead of guessing.
+- Missing or inconclusive provider data degrades to `-`, `unknown`, or `unavailable`; the scheduler keeps polling but, rather than blocking forever, launches optimistically once `--max-unavailable-wait` is exceeded (a known rate-limit still waits for its real reset time).
 - Provider local data formats and CLI syntax can change.
 - Copilot AI credits are parsed when requested by `llm-usage`, but scheduler gating uses monthly remaining usage unless later configured otherwise.
 

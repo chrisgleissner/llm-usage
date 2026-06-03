@@ -21,6 +21,7 @@ AT_TIME=""
 WINDOW="auto"
 MIN_REMAINING="1"
 POLL_INTERVAL="60"
+MAX_UNAVAILABLE_WAIT="900"
 RETRY_DELAYS="60,180,600"
 NO_RETRY=0
 CWD="$(pwd)"
@@ -65,6 +66,12 @@ Options:
   --window auto|5h|weekly|monthly  Usage window to gate on (default: auto).
   --min-remaining PERCENT     Minimum required remaining percentage (default: 1).
   --poll-interval SECONDS     Poll interval when reset data is unavailable (default: 60).
+  --max-unavailable-wait SECONDS  Max time to keep polling while usage data cannot be
+                              measured (no network, transient API failure, inconclusive
+                              data) before launching optimistically and letting the tool's
+                              own rate-limit handling and --retry-delays take over.
+                              0 waits forever (default: 900). Does not apply to a known
+                              rate-limit reset, which always waits for the real reset time.
   --retry-delays LIST         Comma-separated retry delays (default: 60,180,600).
   --no-retry                  Disable retries after failed submission.
   --cwd DIR                   Working directory for the target CLI (default: current directory).
@@ -93,6 +100,17 @@ is_number() {
 
 is_integer() {
   [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+# A usage decision is "undeterminable" when we cannot positively measure the
+# remaining quota: no network, a transient API failure, an unsupported window,
+# or inconclusive data. These are distinct from "rate-limited", which carries a
+# real reset epoch we can wait for precisely.
+is_undetermined_reason() {
+  case "${1:-}" in
+    unavailable|inconclusive-usage|unsupported-window) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 json_quote() {
@@ -124,6 +142,7 @@ safe_args_json() {
     --arg window "$WINDOW" \
     --arg min_remaining "$MIN_REMAINING" \
     --arg poll_interval "$POLL_INTERVAL" \
+    --arg max_unavailable_wait "$MAX_UNAVAILABLE_WAIT" \
     --arg retry_delays "$RETRY_DELAYS" \
     --arg cwd "$CWD" \
     --arg mode "$EXEC_MODE" \
@@ -134,7 +153,7 @@ safe_args_json() {
     --argjson dry_run "$DRY_RUN" \
     --argjson wake "$WAKE" \
     --argjson suspend_until_ready "$SUSPEND_UNTIL_READY" \
-    '{tool:$tool,window:$window,min_remaining:($min_remaining|tonumber),poll_interval:($poll_interval|tonumber),retry_delays:$retry_delays,cwd:$cwd,mode:$mode,tmux:$tmux,prompt_source:$prompt_source,log_dir:$log_dir,auto_confirm:$auto_confirm,dry_run:$dry_run,wake:$wake,suspend_until_ready:$suspend_until_ready}'
+    '{tool:$tool,window:$window,min_remaining:($min_remaining|tonumber),poll_interval:($poll_interval|tonumber),max_unavailable_wait:($max_unavailable_wait|tonumber),retry_delays:$retry_delays,cwd:$cwd,mode:$mode,tmux:$tmux,prompt_source:$prompt_source,log_dir:$log_dir,auto_confirm:$auto_confirm,dry_run:$dry_run,wake:$wake,suspend_until_ready:$suspend_until_ready}'
 }
 
 parse_args() {
@@ -147,6 +166,7 @@ parse_args() {
       --window) [[ $# -ge 2 ]] || { err "--window requires a value"; exit 2; }; WINDOW="$2"; shift 2 ;;
       --min-remaining) [[ $# -ge 2 ]] || { err "--min-remaining requires a value"; exit 2; }; MIN_REMAINING="$2"; shift 2 ;;
       --poll-interval) [[ $# -ge 2 ]] || { err "--poll-interval requires seconds"; exit 2; }; POLL_INTERVAL="$2"; shift 2 ;;
+      --max-unavailable-wait) [[ $# -ge 2 ]] || { err "--max-unavailable-wait requires seconds"; exit 2; }; MAX_UNAVAILABLE_WAIT="$2"; shift 2 ;;
       --retry-delays) [[ $# -ge 2 ]] || { err "--retry-delays requires a list"; exit 2; }; RETRY_DELAYS="$2"; shift 2 ;;
       --no-retry) NO_RETRY=1; RETRY_DELAYS=""; shift ;;
       --cwd) [[ $# -ge 2 ]] || { err "--cwd requires a directory"; exit 2; }; CWD="$2"; shift 2 ;;
@@ -198,6 +218,7 @@ validate_args() {
     err "--poll-interval must be at least 1"
     exit 2
   fi
+  is_integer "$MAX_UNAVAILABLE_WAIT" || { err "--max-unavailable-wait must be integer seconds (0 to wait forever)"; exit 2; }
   is_integer "$PRE_SUSPEND_CONFIRMATION_SECONDS" || { err "LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS must be integer seconds"; exit 2; }
   validate_retry_delays "$RETRY_DELAYS"
 }
@@ -686,6 +707,7 @@ scheduler_resume_argv_json() {
     --window "$WINDOW"
     --min-remaining "$MIN_REMAINING"
     --poll-interval "$POLL_INTERVAL"
+    --max-unavailable-wait "$MAX_UNAVAILABLE_WAIT"
     --cwd "$CWD"
     "$auto_flag"
     --log-dir "$LOG_DIR"
@@ -769,6 +791,7 @@ PY
 
 wait_until_usable() {
   local not_before snapshot decision usable wait_until reason now target
+  local undetermined_since="" waited
   not_before="$(parse_not_before_epoch)"
   while true; do
     now="$(now_epoch)"
@@ -798,6 +821,33 @@ wait_until_usable() {
     if [[ "$usable" == "true" ]]; then
       return 0
     fi
+
+    # When usage cannot be measured (no network, transient API failure,
+    # inconclusive/unsupported data) we must not block forever: a scheduled run
+    # armed for a window reset would otherwise never fire if the probe is down
+    # right after resume-from-suspend. Bound the wait, then proceed optimistically
+    # and let the tool's own rate-limit handling and --retry-delays cover the rare
+    # case where we were actually still limited. A known rate-limit (with a real
+    # reset epoch) is excluded and still waits precisely.
+    if is_undetermined_reason "$reason"; then
+      [[ -n "$undetermined_since" ]] || undetermined_since="$now"
+      waited=$(( now - undetermined_since ))
+      if (( MAX_UNAVAILABLE_WAIT > 0 )) && (( waited >= MAX_UNAVAILABLE_WAIT )); then
+        log_text "usage undeterminable for ${waited}s (reason=$reason); proceeding optimistically"
+        log_event "optimistic_proceed" "$(jq -nc --arg reason "$reason" --argjson waited "$waited" --argjson max "$MAX_UNAVAILABLE_WAIT" '{reason:$reason,waited:$waited,max_unavailable_wait:$max}')"
+        return 0
+      fi
+      if (( SUSPEND_UNTIL_READY == 1 )); then
+        # There is no real reset epoch to sleep to; re-suspending on the short
+        # poll interval would just churn the machine awake repeatedly. Launch now.
+        log_text "usage undeterminable (reason=$reason) in suspend mode; proceeding optimistically instead of suspend-polling"
+        log_event "optimistic_proceed" "$(jq -nc --arg reason "$reason" --argjson waited "$waited" --argjson max "$MAX_UNAVAILABLE_WAIT" '{reason:$reason,waited:$waited,max_unavailable_wait:$max,suspend_mode:true}')"
+        return 0
+      fi
+    else
+      undetermined_since=""
+    fi
+
     target="${wait_until:-$(( $(now_epoch) + POLL_INTERVAL ))}"
     log_wake_plan "$target"
     if (( SUSPEND_UNTIL_READY == 1 )); then
