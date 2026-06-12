@@ -1241,7 +1241,7 @@ def output_is_retryable(status: int, output: str, attached: bool = False) -> boo
         return True
     return bool(
         re.search(
-            r"rate[ _-]?limited|rate[ _-]?limit (exceeded|reached|hit)|too many requests|http[ /?]429|status 429|429 too many requests|quota (exceeded|reached)|usage limit (exceeded|reached)|overloaded|service unavailable|temporarily unavailable|try again later",
+            r"rate[ _-]?limit (exceeded|reached|hit)|too many requests|http[ /?]429|status 429|429 too many requests|quota (exceeded|reached)|usage limit (exceeded|reached)|overloaded|service unavailable|temporarily unavailable|try again later",
             output,
             re.I,
         )

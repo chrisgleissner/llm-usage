@@ -245,6 +245,8 @@ def test_common_extra_branches(env: dict[str, str], fake_bin: Path, tmp_path: Pa
     assert common.json_for_copilot(None)["reason"] == "unavailable"
     assert common.json_for_copilot({"provider": "copilot", "monthly": {"remaining": 1}, "ai_credits": {"used": 2}}, False).get("ai_credits") is None
     assert common.output_is_retryable(0, "chapter 429") is False
+    assert common.output_is_retryable(0, "claude: rate-limited, codex: usable") is False
+    assert common.output_is_retryable(0, "rate limit reached") is True
     assert common.output_is_retryable(0, "HTTP 429 Too Many Requests") is True
     assert common.output_is_retryable(42, "") is True
     assert common.argv_to_command_line(["a b", "$x"]) == "'a b' '$x'"
