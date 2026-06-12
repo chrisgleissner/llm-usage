@@ -466,6 +466,7 @@ run_tmux() {
   command_line="$(argv_json_to_command_line "$argv_json")"
   {
     printf '%s\n' '#!/usr/bin/env bash'
+    printf '# tmux target: %s\n' "$target"
     printf '%s\n' 'set -euo pipefail'
     printf 'cd %q\n' "$CWD"
     printf '%s\n' 'set +e'
