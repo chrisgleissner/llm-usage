@@ -399,6 +399,7 @@ def schedule_resume_and_suspend(cfg: SchedulerConfig, logs: common.RunLogs, targ
         print(f"dry-run: would schedule {unit}.timer at epoch {target_epoch} ({common.format_local_epoch(target_epoch)}); logs: {logs.run_dir}")
         return True
     env_path = os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+    py_path = os.environ.get("PYTHONPATH") or str(Path(__file__).resolve().parent.parent)
     proc = subprocess.run(
         [
             "systemd-run",
@@ -407,6 +408,7 @@ def schedule_resume_and_suspend(cfg: SchedulerConfig, logs: common.RunLogs, targ
             f"--on-calendar=@{target_epoch}",
             "--timer-property=WakeSystem=true",
             f"--setenv=PATH={env_path}",
+            f"--setenv=PYTHONPATH={py_path}",
             f"--working-directory={cfg.cwd}",
             sys.executable,
             "-m",
