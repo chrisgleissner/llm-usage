@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Shared non-UI helpers for llm-usage and llm-scheduler.
+# Shared helpers for llm-usage, llm-scheduler, and ralph-robin: provider readers,
+# normalization, time/reset formatting, and common CLI plumbing (validation,
+# run-dir logging, argv/JSON helpers).
 # This file expects the caller to run under bash strict mode and to set app-specific paths if defaults are not suitable.
 
 : "${LLM_COMMON_APP_NAME:=llm-common}"
@@ -679,4 +681,252 @@ json_for_copilot() {
         end'
     fi
   fi
+}
+
+# ── Shared CLI plumbing for llm-scheduler and ralph-robin ────────────────────
+# These helpers operate on the callers' conventional globals: PROMPT_TEXT,
+# PROMPT_FILE, RUN_DIR, PROMPT_SHA, LOG_DIR, TEXT_LOG, EVENT_LOG, CWD,
+# MIN_REMAINING, POLL_INTERVAL, MAX_UNAVAILABLE_WAIT, RETRY_DELAYS.
+
+err() {
+  printf 'error: %s\n' "$*" >&2
+}
+
+is_number() {
+  [[ "${1:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]
+}
+
+is_integer() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+format_local_epoch() {
+  date -d "@$1" '+%Y-%m-%d %H:%M:%S %Z'
+}
+
+# Serialize argv (NUL-safe) into a JSON array string.
+argv_to_json() {
+  printf '%s\0' "$@" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.buffer.read().decode().split("\0")[:-1]))'
+}
+
+# Render a JSON argv array as one shell-quoted command line.
+argv_json_to_command_line() {
+  ARGV_JSON="$1" python3 -c 'import json,os,shlex; print(" ".join(shlex.quote(x) for x in json.loads(os.environ["ARGV_JSON"])))'
+}
+
+validate_retry_delays() {
+  local list="${1:-}" part
+  local parts=()
+  [[ -n "$list" ]] || return 0
+  IFS=',' read -r -a parts <<< "$list"
+  for part in "${parts[@]}"; do
+    if ! is_integer "$part"; then
+      err "--retry-delays must be comma-separated integer seconds"
+      return 1
+    fi
+  done
+}
+
+validate_prompt_args() {
+  if [[ -n "$PROMPT_TEXT" && -n "$PROMPT_FILE" ]]; then
+    err "use exactly one of --prompt or --prompt-file"
+    return 1
+  fi
+  if [[ -z "$PROMPT_TEXT" && -z "$PROMPT_FILE" ]]; then
+    err "one of --prompt or --prompt-file is required"
+    return 1
+  fi
+  if [[ -n "$PROMPT_FILE" && ! -r "$PROMPT_FILE" ]]; then
+    err "prompt file is not readable: $PROMPT_FILE"
+    return 1
+  fi
+}
+
+# MIN_REMAINING/POLL_INTERVAL are the callers' option globals, not misspellings.
+# shellcheck disable=SC2153
+validate_gate_args() {
+  [[ -d "$CWD" ]] || { err "--cwd is not a directory: $CWD"; return 1; }
+  is_number "$MIN_REMAINING" || { err "--min-remaining must be numeric"; return 1; }
+  is_integer "$POLL_INTERVAL" || { err "--poll-interval must be integer seconds"; return 1; }
+  if (( POLL_INTERVAL < 1 )); then
+    err "--poll-interval must be at least 1"
+    return 1
+  fi
+  is_integer "$MAX_UNAVAILABLE_WAIT" || { err "--max-unavailable-wait must be integer seconds (0 to wait forever)"; return 1; }
+  validate_retry_delays "$RETRY_DELAYS" || return 1
+}
+
+# A usage window must actually exist for the chosen tool, otherwise gating can
+# never resolve to a known limit (copilot has only a monthly window; codex and
+# claude have 5h/weekly windows but no monthly one).
+validate_tool_window() {
+  local tool="$1" window="$2"
+  case "$window" in
+    auto|5h|weekly|monthly) ;;
+    *) err "invalid --window: $window"; return 1 ;;
+  esac
+  case "$tool:$window" in
+    codex:auto|codex:5h|codex:weekly) ;;
+    claude:auto|claude:5h|claude:weekly) ;;
+    copilot:auto|copilot:monthly) ;;
+    copilot:*) err "--window $window is not valid for copilot (use auto or monthly)"; return 1 ;;
+    *) err "--window $window is not valid for $tool (use auto, 5h, or weekly)"; return 1 ;;
+  esac
+}
+
+log_text() {
+  local msg="$1"
+  [[ -n "${TEXT_LOG:-}" ]] || return 0
+  printf '[%s] %s\n' "$(date -Is)" "$msg" >> "$TEXT_LOG"
+}
+
+log_event() {
+  local type="$1"
+  local data
+  if [[ $# -ge 2 && -n "${2:-}" ]]; then
+    data="$2"
+  else
+    data="{}"
+  fi
+  [[ -n "${EVENT_LOG:-}" ]] || return 0
+  jq -nc --arg ts "$(date -Is)" --arg type "$type" --argjson data "$data" \
+    '{ts:$ts,type:$type,data:$data}' >> "$EVENT_LOG"
+}
+
+# Create or reuse RUN_DIR under LOG_DIR with restrictive permissions, point the
+# TEXT_LOG/EVENT_LOG globals at it, and refresh the latest symlinks.
+setup_run_logs() {
+  local name_suffix="$1"
+  local tool_link="${2:-}"
+  local stamp
+  umask 077
+  mkdir -p "$LOG_DIR"
+  chmod 700 "$LOG_DIR" 2>/dev/null || true
+  if [[ -z "$RUN_DIR" ]]; then
+    stamp="$(date '+%Y%m%d-%H%M%S')"
+    RUN_DIR="$(mktemp -d "$LOG_DIR/${stamp}-${name_suffix}-XXXXXX")"
+  else
+    mkdir -p "$RUN_DIR"
+  fi
+  chmod 700 "$RUN_DIR" 2>/dev/null || true
+  TEXT_LOG="$RUN_DIR/run.log"
+  EVENT_LOG="$RUN_DIR/events.jsonl"
+  : >> "$TEXT_LOG"
+  : >> "$EVENT_LOG"
+  chmod 600 "$TEXT_LOG" "$EVENT_LOG" 2>/dev/null || true
+  ln -sfn "$RUN_DIR" "$LOG_DIR/latest" 2>/dev/null || true
+  if [[ -n "$tool_link" ]]; then
+    ln -sfn "$RUN_DIR" "$LOG_DIR/latest-$tool_link" 2>/dev/null || true
+  fi
+}
+
+# Snapshot the prompt into RUN_DIR/prompt.txt, load PROMPT_TEXT, and set
+# PROMPT_SHA. Safe to call again on a resumed run dir (no self-copy).
+load_prompt() {
+  local prompt_dest prompt_src_real prompt_dest_real
+  prompt_dest="$RUN_DIR/prompt.txt"
+  if [[ -n "$PROMPT_FILE" ]]; then
+    prompt_src_real="$(readlink -f "$PROMPT_FILE" 2>/dev/null || printf '%s' "$PROMPT_FILE")"
+    prompt_dest_real="$(readlink -f "$prompt_dest" 2>/dev/null || printf '%s' "$prompt_dest")"
+    if [[ "$prompt_src_real" != "$prompt_dest_real" ]]; then
+      cp "$PROMPT_FILE" "$prompt_dest"
+    fi
+    IFS= read -r -d '' PROMPT_TEXT < "$prompt_dest" || true
+  else
+    printf '%s' "$PROMPT_TEXT" > "$prompt_dest"
+  fi
+  chmod 600 "$prompt_dest"
+  # shellcheck disable=SC2034  # PROMPT_SHA is consumed by the sourcing CLIs.
+  PROMPT_SHA="$(sha256sum "$prompt_dest" | awk '{print $1}')"
+}
+
+llm_usage_snapshot_for_tool() {
+  local tool="$1"
+  local raw provider_json
+  if [[ -n "${LLM_SCHEDULER_USAGE_JSON:-}" ]]; then
+    raw="$LLM_SCHEDULER_USAGE_JSON"
+    provider_json="$(jq -c --arg tool "$tool" 'if has($tool) then .[$tool] else . end' <<<"$raw")"
+    printf '%s\n' "$provider_json"
+    return
+  fi
+
+  case "$tool" in
+    codex)
+      raw="$(read_codex || true)"
+      json_for_provider "$raw" codex
+      ;;
+    claude)
+      raw="$(read_claude || true)"
+      json_for_provider "$raw" claude
+      ;;
+    copilot)
+      raw="$(read_copilot || true)"
+      json_for_copilot "$raw" 0
+      ;;
+    *)
+      jq -nc --arg provider "$tool" '{provider:$provider, available:false, reason:"unsupported-tool"}'
+      ;;
+  esac
+}
+
+llm_usage_decision_for_tool() {
+  local tool="$1"
+  local window="$2"
+  local min_remaining="$3"
+  local poll_interval="$4"
+  local snapshot="$5"
+  jq -nc \
+    --arg tool "$tool" \
+    --arg window "$window" \
+    --argjson min "$min_remaining" \
+    --argjson now "$(now_epoch)" \
+    --argjson poll "$poll_interval" \
+    --argjson copilot_reset "$(copilot_monthly_reset_epoch | sed 's/^-$/null/')" \
+    --argjson snapshot "$snapshot" '
+      def num: if type == "number" then . elif type == "string" then (tonumber? // null) else null end;
+      def reset_epoch($r):
+        if $r == null then null
+        elif ($r|type) == "number" then ($r|floor)
+        elif ($r|type) == "string" and ($r|test("^[0-9]+(\\.[0-9]+)?$")) then ($r|tonumber|floor)
+        elif ($r|type) == "string" then
+          (($r | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | sub("-00:00$"; "Z") | fromdateiso8601?) // null)
+        else null end;
+      def win($name; $obj):
+        if $obj == null then null
+        else {name:$name, remaining:($obj.remaining|num), resets_at:($obj.resets_at // null), reset_epoch:reset_epoch($obj.resets_at)}
+        end;
+      def selected:
+        if $tool == "copilot" then
+          if ($window == "auto" or $window == "monthly") then
+            [ {name:"monthly", remaining:(.monthly.remaining|num), resets_at:($copilot_reset|tostring), reset_epoch:$copilot_reset} ]
+          else [] end
+        elif $window == "auto" then
+          [win("5h"; .five_hour), win("weekly"; .week)] | map(select(. != null))
+        elif $window == "5h" then
+          [win("5h"; .five_hour)] | map(select(. != null))
+        elif $window == "weekly" then
+          [win("weekly"; .week)] | map(select(. != null))
+        else [] end;
+      # A window is actively exhausted only if remaining is low AND the reset
+      # epoch is in the future (or unknown). A past reset_epoch means the
+      # snapshot is stale: the window has already refilled.
+      def is_active_exhausted($w):
+        $w.remaining != null and $w.remaining <= $min
+        and ($w.reset_epoch == null or $w.reset_epoch > $now);
+      $snapshot
+      | selected as $windows
+      | ($windows | map(select(.remaining != null))) as $known
+      | ($known | map(select(is_active_exhausted(.)))) as $exhausted
+      | ($exhausted | map(select(.reset_epoch != null and .reset_epoch > $now) | .reset_epoch) | max? // null) as $latest_reset
+      | if (.available? == false) then
+          {tool:$tool, usable:false, reason:(.reason // "unavailable"), wait_until:($now + $poll), windows:$windows}
+        elif ($windows|length) == 0 then
+          {tool:$tool, usable:false, reason:"unsupported-window", wait_until:($now + $poll), windows:$windows}
+        elif ($known|length) == 0 then
+          {tool:$tool, usable:false, reason:"inconclusive-usage", wait_until:($now + $poll), windows:$windows}
+        elif ($exhausted|length) > 0 then
+          {tool:$tool, usable:false, reason:"rate-limited", wait_until:(if $latest_reset != null then $latest_reset else ($now + $poll) end), windows:$windows, exhausted:$exhausted}
+        else
+          {tool:$tool, usable:true, reason:"usable", wait_until:null, windows:$windows}
+        end'
 }

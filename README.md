@@ -8,6 +8,7 @@ Small Bash tools for local LLM CLI usage:
 
 - `llm-usage` shows remaining local usage for Codex, Claude Code, and GitHub Copilot.
 - `llm-scheduler` waits until one selected CLI appears usable again, then submits one prompt.
+- `ralph-robin` keeps using one configured CLI until its usage window is exhausted, then advances to the next configured CLI.
 
 The tools share provider detection code in `lib/llm-common.sh`; `llm-scheduler` does not reimplement the `llm-usage` parsers.
 
@@ -16,13 +17,15 @@ The tools share provider detection code in `lib/llm-common.sh`; `llm-scheduler` 
 ```bash
 install -m 755 llm-usage ~/.local/bin/llm-usage
 install -m 755 llm-scheduler ~/.local/bin/llm-scheduler
+install -m 755 ralph-robin ~/.local/bin/ralph-robin
 install -d ~/.local/bin/lib
 install -m 644 lib/llm-common.sh ~/.local/bin/lib/llm-common.sh
 command -v llm-usage
 command -v llm-scheduler
+command -v ralph-robin
 ```
 
-If you keep the scripts in this repository, run them directly with `./llm-usage` and `./llm-scheduler`. If you copy them elsewhere, keep `lib/llm-common.sh` beside the scripts under a `lib` directory.
+If you keep the scripts in this repository, run them directly with `./llm-usage`, `./llm-scheduler`, and `./ralph-robin`. If you copy them elsewhere, keep `lib/llm-common.sh` beside the scripts under a `lib` directory.
 
 ## llm-usage
 
@@ -91,9 +94,10 @@ Scheduler options:
 - `--cwd DIR` sets the target CLI working directory.
 - `--fresh` launches a fresh foreground CLI process and is the default.
 - `--tmux SESSION[:WINDOW]` runs through tmux, creating the session/window when practical.
-- `--command-template TEMPLATE` overrides CLI syntax. Placeholders are `{prompt}`, `{prompt_file}`, and `{cwd}`. The template is tokenized with Python `shlex`; it is not evaluated by a shell.
+- `--command-template TEMPLATE` overrides CLI syntax. Placeholders are `{tool}`, `{prompt}`, `{prompt_file}`, and `{cwd}`. The template is tokenized with Python `shlex`; it is not evaluated by a shell.
 - `--auto-confirm` is enabled by default and only sends Return for recognised safe trust prompts. `--no-auto-confirm` disables it.
 - `--log-dir DIR` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-scheduler/logs`.
+- `--run-dir DIR` writes or resumes a specific run directory. This is mainly useful for wrappers and scheduled resume invocations that should keep all logs in one predictable place.
 - `--dry-run` resolves usage state, timing, command plan, and logs without submitting.
 - `--wake` enables best-effort wake scheduling.
 - `--suspend-until-ready` arms a transient user systemd timer with `WakeSystem=true` for the next reset/not-before time, prints a brief confirmation showing the wake time, tool, model source, prompt, and working directory, suspends the machine, and runs `llm-scheduler` again after wake. This is useful when you want the desktop to sleep until a provider window resets instead of keeping a polling process active.
@@ -108,10 +112,40 @@ llm-scheduler --tool claude --window 5h --prompt-file task.md --suspend-until-re
 Default provider adapters:
 
 - Codex: `codex exec -C <cwd> <prompt>`
-- Claude Code: `claude --print <prompt>` with the process working directory set to `--cwd`
+- Claude Code: `claude --dangerously-skip-permissions --print <prompt>` with the process working directory set to `--cwd`
 - GitHub Copilot: `copilot -C <cwd> --prompt <prompt>`
 
+The Claude adapter skips permission prompts so unattended runs cannot stall; use `--command-template 'claude --print {prompt}'` if you want Claude Code's normal permission checks instead.
+
 Use `--command-template` if an installed CLI changes syntax or you use a wrapper.
+
+## ralph-robin
+
+`ralph-robin` is a small rotation wrapper around `llm-scheduler`. It checks the configured tools in order, keeps using the current tool while it is still usable, advances only when that tool is rate-limited, and delegates the actual prompt launch, retry, wake, and suspend behavior to `llm-scheduler`.
+
+```bash
+ralph-robin --prompt-file task.md
+ralph-robin --prompt "Continue until tests pass"
+ralph-robin --tools claude,codex,copilot --prompt-file task.md
+ralph-robin --prompt-file task.md --tmux llm-work
+ralph-robin --prompt-file task.md --dry-run
+```
+
+Default rotation:
+
+```text
+claude -> codex -> claude -> ...
+```
+
+Important options:
+
+- `--tools LIST` sets the comma-separated rotation. Values are `claude`, `codex`, and `copilot`.
+- `--prompt TEXT` and `--prompt-file FILE` match `llm-scheduler`.
+- `--window`, `--min-remaining`, `--poll-interval`, `--max-unavailable-wait`, `--retry-delays`, `--cwd`, `--fresh`, `--tmux`, `--command-template`, `--auto-confirm`, and `--no-auto-confirm` are passed through to `llm-scheduler`.
+- `--state-file FILE` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/ralph-robin/state.json` and stores the current provider index.
+- `--log-dir DIR` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/ralph-robin/logs`.
+
+When every configured tool is known to be rate-limited, `ralph-robin` chooses the earliest real reset and invokes `llm-scheduler --suspend-until-ready` for that provider. If usage cannot be measured rather than being known exhausted, the scheduler's bounded unavailable wait behavior still applies.
 
 ## Logs
 
@@ -123,6 +157,15 @@ Use `--command-template` if an installed CLI changes syntax or you use a wrapper
 - `attempt-N.out` and `attempt-N.status` for CLI output and exit status.
 
 The scheduler logs normalized arguments, prompt source, prompt SHA-256, full prompt content, usage snapshots, wait decisions, command plan, output, exit code, retry delays, and final status.
+
+For reconnecting from another shell, use the latest symlinks and attempt logs:
+
+```bash
+tail -f ~/.cache/llm-scheduler/logs/latest/run.log
+tail -f ~/.cache/llm-scheduler/logs/latest/attempt-1.out
+```
+
+Provider-specific symlinks such as `latest-claude` and `latest-codex` point at the most recent scheduler run for that provider. `ralph-robin` writes its own run log under `${XDG_CACHE_HOME:-$HOME/.cache}/ralph-robin/logs` and places the child scheduler logs in a `scheduler/` subdirectory of each `ralph-robin` run.
 
 ## Data Sources
 

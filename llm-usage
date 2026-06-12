@@ -89,11 +89,8 @@ USAGE
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --json) JSON_OUTPUT=1; shift ;;
-    -w)
-      [[ $# -ge 2 ]] || { echo "error: -w requires seconds" >&2; exit 2; }
-      WATCH_INTERVAL="$2"; shift 2 ;;
-    --watch)
-      [[ $# -ge 2 ]] || { echo "error: --watch requires seconds" >&2; exit 2; }
+    -w|--watch)
+      [[ $# -ge 2 ]] || { err "$1 requires seconds"; exit 2; }
       WATCH_INTERVAL="$2"; shift 2 ;;
     --show-copilot-credits) SHOW_COPILOT_CREDITS=1; shift ;;
     --show-source) SHOW_SOURCE=1; shift ;;
@@ -103,18 +100,23 @@ while [[ $# -gt 0 ]]; do
     --show-codex-spark) SHOW_CODEX_SPARK=1; shift ;;
     --hide-codex-spark) SHOW_CODEX_SPARK=0; shift ;;
     --copilot-monthly-reset-offset-days)
-      [[ $# -ge 2 ]] || { echo "error: --copilot-monthly-reset-offset-days requires DAYS" >&2; exit 2; }
+      [[ $# -ge 2 ]] || { err "--copilot-monthly-reset-offset-days requires DAYS"; exit 2; }
       COPILOT_MONTHLY_RESET_OFFSET_DAYS="$2"
       shift 2 ;;
     --statusline) STATUSLINE_MODE=1; shift ;;
     --no-header) NO_HEADER=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) err "unknown option: $1"; usage >&2; exit 2 ;;
   esac
 done
 
 if ! [[ "$COPILOT_MONTHLY_RESET_OFFSET_DAYS" =~ ^-?[0-9]+$ ]]; then
-  echo "error: --copilot-monthly-reset-offset-days expects an integer" >&2
+  err "--copilot-monthly-reset-offset-days expects an integer"
+  exit 2
+fi
+
+if [[ "$WATCH_INTERVAL" != "0" ]] && ! is_number "$WATCH_INTERVAL"; then
+  err "--watch requires numeric seconds"
   exit 2
 fi
 
@@ -225,7 +227,7 @@ print_value_row() {
   remaining_colored=$(colorize_percent "$remaining")
   print_table_cell "$TOOL_COL_WIDTH" "$provider" 1
   print_table_cell 12 "$window" 1
-  print_table_cell 10 "$remaining_colored" 1
+  print_table_cell 11 "$remaining_colored" 1
 
   if [[ "$SHOW_REMAINING_TIME" -eq 1 ]]; then
     print_table_cell 14 "$remaining_time" 1
@@ -299,8 +301,8 @@ print_codex_rows() {
   local rows_count row
   rows_count=$(jq -r '(if (.rows|type=="array") then .rows | length else 0 end)' <<<"$codex_json" 2>/dev/null || echo 0)
   if [[ "$rows_count" == "0" ]]; then
-    print_row "Codex" "5h" "$(jq -r '.five_hour.used // empty' <<<"$codex_json")" "$(jq -r '.five_hour.resets_at // empty' <<<"$codex_json")" "$(jq -r '.source // empty' <<<"$codex_json")"
-    print_row "Codex" "weekly" "$(jq -r '.week.used // empty' <<<"$codex_json")" "$(jq -r '.week.resets_at // empty' <<<"$codex_json")" "$(jq -r '.source // empty' <<<"$codex_json")"
+    log_and_print_row "Codex" "5h" "$(jq -r '.five_hour.used // empty' <<<"$codex_json")" "$(jq -r '.five_hour.resets_at // empty' <<<"$codex_json")" "$(jq -r '.source // empty' <<<"$codex_json")"
+    log_and_print_row "Codex" "weekly" "$(jq -r '.week.used // empty' <<<"$codex_json")" "$(jq -r '.week.resets_at // empty' <<<"$codex_json")" "$(jq -r '.source // empty' <<<"$codex_json")"
     return
   fi
 
@@ -422,14 +424,14 @@ render_once() {
       if [[ "$SHOW_SOURCE" -eq 1 ]]; then
         print_header_cell "$TOOL_COL_WIDTH" "Tool" 1
         print_header_cell 12 "Window" 1
-        print_header_cell 10 "Remaining" 1
+        print_header_cell 11 "Remaining" 1
         print_header_cell 14 "Remaining Time" 1
         print_header_cell 16 "Resets" 1
         print_header_cell 12 "Time to Reset" 1
         printf 'Source\n'
         print_rule_cell "$TOOL_COL_WIDTH" 1
         print_rule_cell 12 1
-        print_rule_cell 10 1
+        print_rule_cell 11 1
         print_rule_cell 14 1
         print_rule_cell 16 1
         print_rule_cell 12 1
@@ -437,14 +439,14 @@ render_once() {
       else
         print_header_cell "$TOOL_COL_WIDTH" "Tool" 1
         print_header_cell 12 "Window" 1
-        print_header_cell 10 "Remaining" 1
+        print_header_cell 11 "Remaining" 1
         print_header_cell 14 "Remaining Time" 1
         print_header_cell 16 "Resets" 1
         print_header_cell 12 "Time to Reset" 0
         printf '\n'
         print_rule_cell "$TOOL_COL_WIDTH" 1
         print_rule_cell 12 1
-        print_rule_cell 10 1
+        print_rule_cell 11 1
         print_rule_cell 14 1
         print_rule_cell 16 1
         print_rule_cell 12 0
@@ -454,23 +456,23 @@ render_once() {
       if [[ "$SHOW_SOURCE" -eq 1 ]]; then
         print_header_cell "$TOOL_COL_WIDTH" "Tool" 1
         print_header_cell 12 "Window" 1
-        print_header_cell 10 "Remaining" 1
+        print_header_cell 11 "Remaining" 1
         print_header_cell 16 "Resets" 1
         printf 'Source\n'
         print_rule_cell "$TOOL_COL_WIDTH" 1
         print_rule_cell 12 1
-        print_rule_cell 10 1
+        print_rule_cell 11 1
         print_rule_cell 16 1
         printf '%*s\n' "$TABLE_GAP_WIDTH" '' | tr ' ' '-'
       else
         print_header_cell "$TOOL_COL_WIDTH" "Tool" 1
         print_header_cell 12 "Window" 1
-        print_header_cell 10 "Remaining" 1
+        print_header_cell 11 "Remaining" 1
         print_header_cell 16 "Resets" 0
         printf '\n'
         print_rule_cell "$TOOL_COL_WIDTH" 1
         print_rule_cell 12 1
-        print_rule_cell 10 1
+        print_rule_cell 11 1
         print_rule_cell 16 0
         printf '\n'
       fi

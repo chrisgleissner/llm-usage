@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL="$SCRIPT_DIR/llm-usage"
 SCHEDULER="$SCRIPT_DIR/llm-scheduler"
+RALPH="$SCRIPT_DIR/ralph-robin"
 PATH="$SCRIPT_DIR/ci-bin:$PATH"
 
 fail() {
@@ -244,6 +245,14 @@ assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+95%[[:space:]]+-[[:space:]]+
 
 "$SCHEDULER" --help > "$tmpdir/scheduler-help.txt"
 assert_grep 'Usage: llm-scheduler --tool codex\|claude\|copilot' "$tmpdir/scheduler-help.txt"
+assert_grep '\{tool\}, \{prompt\}, \{prompt_file\}, \{cwd\}' "$tmpdir/scheduler-help.txt"
+
+"$RALPH" --help > "$tmpdir/ralph-help.txt"
+assert_grep 'Usage: ralph-robin' "$tmpdir/ralph-help.txt"
+assert_grep '\{tool\}' "$tmpdir/ralph-help.txt"
+
+expect_fail "$tmpdir/usage-bad-watch.txt" env HOME="$HOME_FIXTURE" "$TOOL" --watch abc
+assert_grep 'watch requires numeric seconds' "$tmpdir/usage-bad-watch.txt"
 
 expect_fail "$tmpdir/scheduler-no-prompt.txt" "$SCHEDULER" --tool codex
 assert_grep 'one of --prompt or --prompt-file is required' "$tmpdir/scheduler-no-prompt.txt"
@@ -257,6 +266,15 @@ expect_fail "$tmpdir/scheduler-bad-threshold.txt" "$SCHEDULER" --tool codex --pr
 assert_grep 'min-remaining' "$tmpdir/scheduler-bad-threshold.txt"
 expect_fail "$tmpdir/scheduler-missing-file.txt" "$SCHEDULER" --tool codex --prompt-file "$tmpdir/no-such-file"
 assert_grep 'prompt file is not readable' "$tmpdir/scheduler-missing-file.txt"
+
+expect_fail "$tmpdir/ralph-no-prompt.txt" "$RALPH"
+assert_grep 'one of --prompt or --prompt-file is required' "$tmpdir/ralph-no-prompt.txt"
+expect_fail "$tmpdir/ralph-bad-tool.txt" "$RALPH" --tools claude,bad --prompt x
+assert_grep 'invalid tool' "$tmpdir/ralph-bad-tool.txt"
+expect_fail "$tmpdir/ralph-bad-window.txt" "$RALPH" --tools claude,copilot --prompt x --window 5h
+assert_grep 'not valid for copilot' "$tmpdir/ralph-bad-window.txt"
+expect_fail "$tmpdir/scheduler-bad-window-combo.txt" "$SCHEDULER" --tool copilot --prompt x --window weekly
+assert_grep 'not valid for copilot' "$tmpdir/scheduler-bad-window-combo.txt"
 
 available_usage='{"available":true,"five_hour":{"remaining":50,"resets_at":"2026-06-02T23:00:00Z"},"week":{"remaining":50,"resets_at":"2026-06-07T23:00:00Z"}}'
 exhausted_usage='{"available":true,"five_hour":{"remaining":0,"resets_at":"2026-06-02T23:00:00Z"},"week":{"remaining":50,"resets_at":"2026-06-07T23:00:00Z"}}'
@@ -273,6 +291,63 @@ LLM_SCHEDULER_USAGE_JSON="$available_usage" \
   "$SCHEDULER" --tool codex --prompt 'hello world' --command-template 'sched-mock {prompt}' --log-dir "$tmpdir/scheduler-logs" > "$tmpdir/scheduler-submit.txt"
 assert_grep '^hello world$' "$SCHED_CAPTURE"
 [[ "$(wc -l < "$SCHED_ATTEMPTS")" == "1" ]] || fail "scheduler did not submit exactly once"
+
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+  "$SCHEDULER" --tool claude --prompt 'hello tool' --command-template 'sched-mock {tool} {prompt}' --run-dir "$tmpdir/scheduler-fixed-run" --log-dir "$tmpdir/scheduler-fixed-logs" > "$tmpdir/scheduler-fixed.txt"
+assert_grep '^claude hello tool$' "$SCHED_CAPTURE"
+[[ -L "$tmpdir/scheduler-fixed-logs/latest" ]] || fail "scheduler did not create latest symlink"
+[[ -L "$tmpdir/scheduler-fixed-logs/latest-claude" ]] || fail "scheduler did not create latest-claude symlink"
+[[ -s "$tmpdir/scheduler-fixed-run/attempt-1.out" ]] || fail "scheduler did not write attempt output in fixed run dir"
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  "$SCHEDULER" --tool claude --prompt-file "$tmpdir/scheduler-fixed-run/prompt.txt" --command-template 'sched-mock {tool} {prompt}' --run-dir "$tmpdir/scheduler-fixed-run" --log-dir "$tmpdir/scheduler-fixed-logs" --dry-run > "$tmpdir/scheduler-fixed-resume.txt"
+assert_grep 'dry-run: logs written to ' "$tmpdir/scheduler-fixed-resume.txt"
+
+ralph_usage='{"claude":{"available":true,"five_hour":{"remaining":50,"resets_at":"2026-06-02T23:00:00Z"},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50,"resets_at":"2026-06-02T23:00:00Z"},"week":{"remaining":50}}}'
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+LLM_SCHEDULER_USAGE_JSON="$ralph_usage" \
+  SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+  "$RALPH" --prompt 'rr-one' --command-template 'sched-mock {tool} {prompt}' --state-file "$tmpdir/ralph-state.json" --log-dir "$tmpdir/ralph-logs" --no-retry > "$tmpdir/ralph-submit.txt"
+assert_grep '^claude rr-one$' "$SCHED_CAPTURE"
+jq -e '.current_tool == "claude" and .current_index == 0' "$tmpdir/ralph-state.json" >/dev/null \
+  || fail "ralph-robin did not persist initial Claude selection"
+ralph_dir="$(awk '/ralph-robin: logs:/ {print $NF}' "$tmpdir/ralph-submit.txt")"
+jq -e 'select(.type=="selection") | .data.tool == "claude" and .data.rotation_reason == "current-usable"' "$ralph_dir/events.jsonl" >/dev/null \
+  || fail "ralph-robin did not log current-usable selection"
+[[ -s "$ralph_dir/scheduler/attempt-1.out" ]] || fail "ralph-robin scheduler child did not write attempt output"
+[[ -L "$tmpdir/ralph-logs/latest" ]] || fail "ralph-robin did not create latest symlink"
+
+ralph_rotate_usage='{"claude":{"available":true,"five_hour":{"remaining":0,"resets_at":1780441200},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50,"resets_at":1780441200},"week":{"remaining":50}}}'
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+LLM_USAGE_NOW_EPOCH=1780430000 \
+LLM_SCHEDULER_USAGE_JSON="$ralph_rotate_usage" \
+  SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+  "$RALPH" --prompt 'rr-two' --command-template 'sched-mock {tool} {prompt}' --state-file "$tmpdir/ralph-state.json" --log-dir "$tmpdir/ralph-logs" --no-retry > "$tmpdir/ralph-rotate.txt"
+assert_grep '^codex rr-two$' "$SCHED_CAPTURE"
+jq -e '.current_tool == "codex" and .current_index == 1' "$tmpdir/ralph-state.json" >/dev/null \
+  || fail "ralph-robin did not advance to Codex after Claude exhaustion"
+
+ralph_all_exhausted='{"claude":{"available":true,"five_hour":{"remaining":0,"resets_at":1780441200},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":0,"resets_at":1780444800},"week":{"remaining":50}}}'
+SYSTEMD_RUN_LOG="$tmpdir/systemd-run-ralph.log"
+SYSTEMCTL_LOG="$tmpdir/systemctl-ralph.log"
+: > "$SYSTEMD_RUN_LOG"
+: > "$SYSTEMCTL_LOG"
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+LLM_USAGE_NOW_EPOCH=1780430000 \
+LLM_SCHEDULER_USAGE_JSON="$ralph_all_exhausted" \
+LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1 \
+SYSTEMD_RUN_LOG="$SYSTEMD_RUN_LOG" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+  "$RALPH" --prompt 'rr-three' --command-template 'sched-mock {tool} {prompt}' --state-file "$tmpdir/ralph-state.json" --log-dir "$tmpdir/ralph-logs" --no-retry > "$tmpdir/ralph-suspend.txt"
+assert_grep 'all configured tools are rate-limited' "$tmpdir/ralph-suspend.txt"
+assert_grep 'until [0-9]{4}-[0-9]{2}-[0-9]{2} .*\(epoch 1780441200\)' "$tmpdir/ralph-suspend.txt"
+assert_grep '--on-calendar=@1780441200' "$SYSTEMD_RUN_LOG"
+[[ "$(wc -l < "$SCHED_ATTEMPTS")" == "0" ]] || fail "ralph-robin should not submit before resumed scheduler when all tools are exhausted"
 
 LLM_USAGE_NOW_EPOCH=1780430000 \
 LLM_SCHEDULER_USAGE_JSON="$exhausted_usage" \

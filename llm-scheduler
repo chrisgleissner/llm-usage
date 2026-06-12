@@ -79,10 +79,11 @@ Options:
   --cwd DIR                   Working directory for the target CLI (default: current directory).
   --fresh                     Launch a fresh CLI process (default).
   --tmux SESSION[:WINDOW]     Execute via tmux instead of foreground process.
-  --command-template TEMPLATE Override provider command; placeholders: {prompt}, {prompt_file}, {cwd}.
+  --command-template TEMPLATE Override provider command; placeholders: {tool}, {prompt}, {prompt_file}, {cwd}.
   --auto-confirm              Acknowledge only known safe prompts (default).
   --no-auto-confirm           Disable automatic prompt acknowledgement.
   --log-dir DIR               Log directory (default: ~/.cache/llm-scheduler/logs).
+  --run-dir DIR               Reuse/write one specific run directory.
   --dry-run                   Resolve state and command plan without submitting.
   --wake                      Best-effort wake scheduling diagnostics/logging.
   --suspend-until-ready       Arm a wake timer for the next reset/not-before time,
@@ -92,18 +93,6 @@ Options:
 USAGE
 }
 
-err() {
-  printf 'error: %s\n' "$*" >&2
-}
-
-is_number() {
-  [[ "${1:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]
-}
-
-is_integer() {
-  [[ "${1:-}" =~ ^[0-9]+$ ]]
-}
-
 # A usage decision is "undeterminable" when we cannot positively measure the
 # remaining quota: no network, a transient API failure, an unsupported window,
 # inconclusive data, or any provider-specific unavailable reason. These are
@@ -111,25 +100,6 @@ is_integer() {
 # Invert logic: only "rate-limited" is NOT undetermined.
 is_undetermined_reason() {
   [[ "${1:-}" != "rate-limited" ]]
-}
-
-log_text() {
-  local msg="$1"
-  [[ -n "$TEXT_LOG" ]] || return 0
-  printf '[%s] %s\n' "$(date -Is)" "$msg" >> "$TEXT_LOG"
-}
-
-log_event() {
-  local type="$1"
-  local data
-  if [[ $# -ge 2 && -n "${2:-}" ]]; then
-    data="$2"
-  else
-    data="{}"
-  fi
-  [[ -n "$EVENT_LOG" ]] || return 0
-  jq -nc --arg ts "$(date -Is)" --arg type "$type" --argjson data "$data" \
-    '{ts:$ts,type:$type,data:$data}' >> "$EVENT_LOG"
 }
 
 safe_args_json() {
@@ -172,10 +142,11 @@ parse_args() {
       --auto-confirm) AUTO_CONFIRM=1; shift ;;
       --no-auto-confirm) AUTO_CONFIRM=0; shift ;;
       --log-dir) [[ $# -ge 2 ]] || { err "--log-dir requires a directory"; exit 2; }; LOG_DIR="$2"; shift 2 ;;
-    --dry-run) DRY_RUN=1; shift ;;
-    --wake) WAKE=1; shift ;;
-    --suspend-until-ready) SUSPEND_UNTIL_READY=1; WAKE=1; shift ;;
-    --wake-test) WAKE_TEST=1; shift ;;
+      --run-dir) [[ $# -ge 2 ]] || { err "--run-dir requires a directory"; exit 2; }; RUN_DIR="$2"; shift 2 ;;
+      --dry-run) DRY_RUN=1; shift ;;
+      --wake) WAKE=1; shift ;;
+      --suspend-until-ready) SUSPEND_UNTIL_READY=1; WAKE=1; shift ;;
+      --wake-test) WAKE_TEST=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) err "unknown option: $1"; usage >&2; exit 2 ;;
     esac
@@ -191,48 +162,12 @@ validate_args() {
     "") err "--tool is required"; exit 2 ;;
     *) err "invalid --tool: $TOOL"; exit 2 ;;
   esac
-  if [[ -n "$PROMPT_TEXT" && -n "$PROMPT_FILE" ]]; then
-    err "use exactly one of --prompt or --prompt-file"
-    exit 2
-  fi
-  if [[ -z "$PROMPT_TEXT" && -z "$PROMPT_FILE" ]]; then
-    err "one of --prompt or --prompt-file is required"
-    exit 2
-  fi
-  if [[ -n "$PROMPT_FILE" && ! -r "$PROMPT_FILE" ]]; then
-    err "prompt file is not readable: $PROMPT_FILE"
-    exit 2
-  fi
-  [[ -d "$CWD" ]] || { err "--cwd is not a directory: $CWD"; exit 2; }
-  case "$WINDOW" in
-    auto|5h|weekly|monthly) ;;
-    *) err "invalid --window: $WINDOW"; exit 2 ;;
-  esac
-  # A window must actually exist for the chosen tool, otherwise gating can never
-  # resolve to a known limit (copilot has only a monthly window; codex/claude
-  # have 5h and weekly windows but no monthly one).
-  case "$TOOL" in
-    copilot)
-      case "$WINDOW" in
-        auto|monthly) ;;
-        *) err "--window $WINDOW is not valid for copilot (use auto or monthly)"; exit 2 ;;
-      esac ;;
-    codex|claude)
-      if [[ "$WINDOW" == "monthly" ]]; then
-        err "--window monthly is not valid for $TOOL (use auto, 5h, or weekly)"; exit 2
-      fi ;;
-  esac
-  is_number "$MIN_REMAINING" || { err "--min-remaining must be numeric"; exit 2; }
-  is_integer "$POLL_INTERVAL" || { err "--poll-interval must be integer seconds"; exit 2; }
-  if (( POLL_INTERVAL < 1 )); then
-    err "--poll-interval must be at least 1"
-    exit 2
-  fi
-  is_integer "$MAX_UNAVAILABLE_WAIT" || { err "--max-unavailable-wait must be integer seconds (0 to wait forever)"; exit 2; }
+  validate_prompt_args || exit 2
+  validate_tool_window "$TOOL" "$WINDOW" || exit 2
+  validate_gate_args || exit 2
   is_integer "$PRE_SUSPEND_CONFIRMATION_SECONDS" || { err "LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS must be integer seconds"; exit 2; }
-  validate_retry_delays "$RETRY_DELAYS"
-  # Validate --at / --not-before early so an invalid time exits before setup_logs
-  # creates a run directory.
+  # Validate --at / --not-before early so an invalid time exits before
+  # setup_run_logs creates a run directory.
   if [[ -n "$AT_TIME" ]]; then
     NOT_BEFORE_EPOCH="$(date -d "$AT_TIME" +%s 2>/dev/null)" || {
       err "could not parse --at/--not-before time: $AT_TIME"
@@ -241,42 +176,6 @@ validate_args() {
   else
     NOT_BEFORE_EPOCH=""
   fi
-}
-
-validate_retry_delays() {
-  local list="${1:-}" part
-  local parts=()
-  [[ -n "$list" ]] || return 0
-  IFS=',' read -r -a parts <<< "$list"
-  for part in "${parts[@]}"; do
-    is_integer "$part" || { err "--retry-delays must be comma-separated integer seconds"; exit 2; }
-  done
-}
-
-load_prompt() {
-  if [[ -n "$PROMPT_FILE" ]]; then
-    cp "$PROMPT_FILE" "$RUN_DIR/prompt.txt"
-    IFS= read -r -d '' PROMPT_TEXT < "$RUN_DIR/prompt.txt" || true
-  else
-    printf '%s' "$PROMPT_TEXT" > "$RUN_DIR/prompt.txt"
-  fi
-  chmod 600 "$RUN_DIR/prompt.txt"
-  PROMPT_SHA="$(sha256sum "$RUN_DIR/prompt.txt" | awk '{print $1}')"
-}
-
-setup_logs() {
-  local stamp
-  stamp="$(date '+%Y%m%d-%H%M%S')"
-  umask 077
-  mkdir -p "$LOG_DIR"
-  chmod 700 "$LOG_DIR" 2>/dev/null || true
-  RUN_DIR="$(mktemp -d "$LOG_DIR/${stamp}-${TOOL:-wake}-XXXXXX")"
-  chmod 700 "$RUN_DIR" 2>/dev/null || true
-  TEXT_LOG="$RUN_DIR/run.log"
-  EVENT_LOG="$RUN_DIR/events.jsonl"
-  : > "$TEXT_LOG"
-  : > "$EVENT_LOG"
-  chmod 600 "$TEXT_LOG" "$EVENT_LOG" 2>/dev/null || true
 }
 
 parse_not_before_epoch() {
@@ -288,86 +187,12 @@ parse_not_before_epoch() {
 }
 
 scheduler_usage_snapshot() {
-  local raw provider_json
-  if [[ -n "${LLM_SCHEDULER_USAGE_JSON:-}" ]]; then
-    raw="$LLM_SCHEDULER_USAGE_JSON"
-    provider_json="$(jq -c --arg tool "$TOOL" 'if has($tool) then .[$tool] else . end' <<<"$raw")"
-    printf '%s\n' "$provider_json"
-    return
-  fi
-
-  case "$TOOL" in
-    codex)
-      raw="$(read_codex || true)"
-      json_for_provider "$raw" codex
-      ;;
-    claude)
-      raw="$(read_claude || true)"
-      json_for_provider "$raw" claude
-      ;;
-    copilot)
-      raw="$(read_copilot || true)"
-      json_for_copilot "$raw" 0
-      ;;
-  esac
+  llm_usage_snapshot_for_tool "$TOOL"
 }
 
 usage_decision() {
   local snapshot="$1"
-  jq -nc \
-    --arg tool "$TOOL" \
-    --arg window "$WINDOW" \
-    --argjson min "$MIN_REMAINING" \
-    --argjson now "$(now_epoch)" \
-    --argjson poll "$POLL_INTERVAL" \
-    --argjson copilot_reset "$(copilot_monthly_reset_epoch | sed 's/^-$/null/')" \
-    --argjson snapshot "$snapshot" '
-      def num: if type == "number" then . elif type == "string" then (tonumber? // null) else null end;
-      def reset_epoch($r):
-        if $r == null then null
-        elif ($r|type) == "number" then ($r|floor)
-        elif ($r|test("^[0-9]+(\\.[0-9]+)?$")) then ($r|tonumber|floor)
-        elif ($r|type) == "string" then
-          (($r | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | sub("-00:00$"; "Z") | fromdateiso8601?) // null)
-        else null end;
-      def win($name; $obj):
-        if $obj == null then null
-        else {name:$name, remaining:($obj.remaining|num), resets_at:($obj.resets_at // null), reset_epoch:reset_epoch($obj.resets_at)}
-        end;
-      def selected:
-        if $tool == "copilot" then
-          if ($window == "auto" or $window == "monthly") then
-            [ {name:"monthly", remaining:(.monthly.remaining|num), resets_at:($copilot_reset|tostring), reset_epoch:$copilot_reset} ]
-          else [] end
-        elif $window == "auto" then
-          [win("5h"; .five_hour), win("weekly"; .week)] | map(select(. != null))
-        elif $window == "5h" then
-          [win("5h"; .five_hour)] | map(select(. != null))
-        elif $window == "weekly" then
-          [win("weekly"; .week)] | map(select(. != null))
-        else [] end;
-      # A window is actively exhausted only if remaining is low AND the reset
-      # epoch is in the future (or unknown). A past reset_epoch means the
-      # snapshot is stale — the window has already refilled.
-      def is_active_exhausted($w):
-        $w.remaining != null and $w.remaining <= $min
-        and ($w.reset_epoch == null or $w.reset_epoch > $now);
-      $snapshot
-      | selected as $windows
-      | ($windows | map(select(.remaining != null))) as $known
-      | ($known | map(select(is_active_exhausted(.)))) as $exhausted
-      | ($exhausted | map(select(.reset_epoch != null and .reset_epoch > $now) | .reset_epoch) | max? // null) as $latest_reset
-      | if (.available? == false) then
-          {usable:false, reason:(.reason // "unavailable"), wait_until:($now + $poll), windows:$windows}
-        elif ($windows|length) == 0 then
-          {usable:false, reason:"unsupported-window", wait_until:($now + $poll), windows:$windows}
-        elif ($known|length) == 0 then
-          {usable:false, reason:"inconclusive-usage", wait_until:($now + $poll), windows:$windows}
-        elif ($exhausted|length) > 0 then
-          {usable:false, reason:"rate-limited", wait_until:(if $latest_reset != null then $latest_reset else ($now + $poll) end), windows:$windows, exhausted:$exhausted}
-        else
-          {usable:true, reason:"usable", wait_until:null, windows:$windows}
-        end'
+  llm_usage_decision_for_tool "$TOOL" "$WINDOW" "$MIN_REMAINING" "$POLL_INTERVAL" "$snapshot"
 }
 
 sleep_until() {
@@ -394,7 +219,7 @@ provider_default_argv_json() {
 
 template_argv_json() {
   local template="$1"
-  TEMPLATE="$template" PROMPT="$PROMPT_TEXT" PROMPT_FILE="$RUN_DIR/prompt.txt" CWD_VALUE="$CWD" python3 - <<'PY'
+  TEMPLATE="$template" TOOL="$TOOL" PROMPT="$PROMPT_TEXT" PROMPT_FILE="$RUN_DIR/prompt.txt" CWD_VALUE="$CWD" python3 - <<'PY'
 import json
 import os
 import shlex
@@ -407,6 +232,7 @@ except ValueError as exc:
     sys.exit(2)
 
 values = {
+    "{tool}": os.environ.get("TOOL", ""),
     "{prompt}": os.environ.get("PROMPT", ""),
     "{prompt_file}": os.environ.get("PROMPT_FILE", ""),
     "{cwd}": os.environ.get("CWD_VALUE", ""),
@@ -438,11 +264,6 @@ scheduler_model_description() {
     claude) printf '%s\n' 'Claude Code default/configured model' ;;
     copilot) printf '%s\n' 'GitHub Copilot CLI default/configured model' ;;
   esac
-}
-
-format_local_epoch() {
-  local epoch="$1"
-  date -d "@$epoch" '+%Y-%m-%d %H:%M:%S %Z'
 }
 
 print_pre_suspend_confirmation() {
@@ -512,7 +333,20 @@ if pid == 0:
 parts = []
 trust_sent = False
 exit_code = 124
+eof = False
 start = time.time()
+out_fh = open(output_file, "w", encoding="utf-8")
+
+def clean(text):
+    text = text.replace("\r", "\n").replace("\a", "")
+    return re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", text)
+
+def reap_status(status):
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    if os.WIFSIGNALED(status):
+        return 128 + os.WTERMSIG(status)
+    return None
 
 while True:
     if time.time() - start > timeout:
@@ -522,11 +356,15 @@ while True:
         try:
             chunk = os.read(fd, 65536)
         except OSError:
+            eof = True
             break
         if not chunk:
+            eof = True
             break
         text = chunk.decode("utf-8", "replace")
         parts.append(text)
+        out_fh.write(clean(text))
+        out_fh.flush()
         combined = "".join(parts)
         if auto_confirm and not trust_sent and any(p in combined for p in safe_prompts):
             os.write(fd, b"\r")
@@ -537,23 +375,30 @@ while True:
         done = pid
         status = 0
     if done == pid:
-        if os.WIFEXITED(status):
-            exit_code = os.WEXITSTATUS(status)
-        elif os.WIFSIGNALED(status):
-            exit_code = 128 + os.WTERMSIG(status)
+        code = reap_status(status)
+        if code is not None:
+            exit_code = code
         break
 
 if exit_code == 124:
-    try:
-        done, status = os.waitpid(pid, os.WNOHANG)
-    except ChildProcessError:
-        done = pid
-        status = 0
-    if done == pid:
-        if os.WIFEXITED(status):
-            exit_code = os.WEXITSTATUS(status)
-        elif os.WIFSIGNALED(status):
-            exit_code = 128 + os.WTERMSIG(status)
+    # On Linux a child's PTY fds close (EOF/EIO on the master) slightly before
+    # the process becomes waitable, so a single WNOHANG here can miss a child
+    # that exited cleanly and misreport 124. After EOF, poll briefly for the
+    # real status before treating the run as timed out.
+    deadline = time.time() + (5.0 if eof else 0.0)
+    while True:
+        try:
+            done, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            break
+        if done == pid:
+            code = reap_status(status)
+            if code is not None:
+                exit_code = code
+            break
+        if time.time() >= deadline:
+            break
+        time.sleep(0.01)
 
 if exit_code == 124:
     for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -563,10 +408,11 @@ if exit_code == 124:
             break
         time.sleep(0.2)
 
-text = "".join(parts).replace("\r", "\n").replace("\a", "")
-text = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", text)
-with open(output_file, "w", encoding="utf-8") as fh:
-    fh.write(text)
+text = clean("".join(parts))
+out_fh.seek(0)
+out_fh.truncate()
+out_fh.write(text)
+out_fh.close()
 with open(status_file, "w", encoding="utf-8") as fh:
     fh.write(str(exit_code))
 sys.exit(exit_code)
@@ -582,7 +428,7 @@ run_tmux() {
     printf '127' > "$status_file"
     return 127
   }
-  local session window target cmd_file command_line waited
+  local session window target cmd_file cmd_invocation command_line waited
   if [[ "$TMUX_TARGET" == *:* ]]; then
     session="${TMUX_TARGET%%:*}"
     window="${TMUX_TARGET#*:}"
@@ -597,15 +443,7 @@ run_tmux() {
   fi
   target="$session:$window"
   cmd_file="$RUN_DIR/tmux-command.sh"
-  command_line="$(ARGV_JSON="$argv_json" python3 - <<'PY'
-import json
-import os
-import shlex
-
-argv = json.loads(os.environ["ARGV_JSON"])
-print(" ".join(shlex.quote(x) for x in argv))
-PY
-)"
+  command_line="$(argv_json_to_command_line "$argv_json")"
   {
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'set -euo pipefail'
@@ -621,12 +459,13 @@ PY
     printf '%s\n' 'exit "$status"'
   } > "$cmd_file"
   chmod 700 "$cmd_file"
+  printf -v cmd_invocation 'bash %q' "$cmd_file"
   if ! tmux has-session -t "$session" 2>/dev/null; then
-    tmux new-session -d -s "$session" -n "$window" "bash '$cmd_file'"
+    tmux new-session -d -s "$session" -n "$window" "$cmd_invocation"
   elif ! tmux list-windows -t "$session" -F '#W' | grep -Fxq "$window"; then
-    tmux new-window -d -t "$session" -n "$window" "bash '$cmd_file'"
+    tmux new-window -d -t "$session" -n "$window" "$cmd_invocation"
   else
-    tmux send-keys -t "$target" "bash '$cmd_file'" C-m
+    tmux send-keys -t "$target" "$cmd_invocation" C-m
   fi
   waited=0
   while [[ ! -s "$status_file" && "$waited" -lt "${LLM_SCHEDULER_TMUX_TIMEOUT:-3600}" ]]; do
@@ -664,6 +503,8 @@ submit_once() {
   output_file="$RUN_DIR/attempt-${attempt}.out"
   status_file="$RUN_DIR/attempt-${attempt}.status"
   log_text "attempt $attempt command: $(jq -c . <<<"$argv_json")"
+  log_text "attempt $attempt output: $output_file"
+  log_text "tail attempt $attempt: tail -f '$output_file'"
   log_event "command_plan" "$(jq -nc --argjson argv "$argv_json" --arg mode "$EXEC_MODE" '{mode:$mode, argv:$argv}')"
   if [[ "$EXEC_MODE" == "tmux" ]]; then
     run_tmux "$argv_json" "$output_file" "$status_file" || true
@@ -783,6 +624,7 @@ scheduler_resume_argv_json() {
     --cwd "$CWD"
     "$auto_flag"
     --log-dir "$LOG_DIR"
+    --run-dir "$RUN_DIR"
   )
   args+=("${retry_parts[@]}")
   if [[ "$mode_flag" == "--tmux" ]]; then
@@ -794,7 +636,7 @@ scheduler_resume_argv_json() {
     args+=(--command-template "$COMMAND_TEMPLATE")
   fi
 
-  printf '%s\0' "${args[@]}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.buffer.read().decode().split("\0")[:-1]))'
+  argv_to_json "${args[@]}"
 }
 
 schedule_resume_and_suspend() {
@@ -826,15 +668,7 @@ schedule_resume_and_suspend() {
 
   unit="llm-scheduler-resume-${TOOL}-$(date +%s)"
   argv_json="$(scheduler_resume_argv_json)"
-  command_line="$(ARGV_JSON="$argv_json" python3 - <<'PY'
-import json
-import os
-import shlex
-
-argv = json.loads(os.environ["ARGV_JSON"])
-print(" ".join(shlex.quote(x) for x in argv))
-PY
-)"
+  command_line="$(argv_json_to_command_line "$argv_json")"
   env_path="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 
   log_text "suspend-until-ready scheduling unit=$unit target=$target_epoch reason=$reason"
@@ -876,6 +710,7 @@ PY
   # Install Ctrl-C / SIGTERM cleanup so the armed timer is stopped if the user
   # cancels during the pre-suspend countdown.
   _suspend_unit="$unit"
+  # shellcheck disable=SC2317  # Called indirectly by the trap below.
   _suspend_cleanup() {
     local cleanup_status=0
     printf '\nsuspend cancelled: disarming timer %s.timer\n' "$_suspend_unit"
@@ -992,7 +827,7 @@ main() {
   need sha256sum
   need awk
   need python3
-  setup_logs
+  setup_run_logs "${TOOL:-wake}" "${TOOL:-}"
   load_prompt
   log_text "start provider=$TOOL cwd=$CWD"
   log_event "start" "$(safe_args_json)"

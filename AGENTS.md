@@ -6,19 +6,22 @@ This repo contains small Linux Bash CLIs for Codex, Claude Code, and GitHub Copi
 
 * `llm-usage` — show local usage/quota for each provider.
 * `llm-scheduler` — submit a prompt to a provider CLI once usage data says it is usable (optionally waking/suspending around a window reset).
-* `lib/llm-common.sh` — shared, non-UI helpers (provider readers, normalization, time/reset formatting) sourced by both CLIs.
-* Regression tests: `llm-usage-tests.sh` (covers both CLIs).
+* `ralph-robin` — keep using one configured provider until it is exhausted, then rotate to the next provider and delegate launch/suspend behavior to `llm-scheduler`.
+* `lib/llm-common.sh` — shared helpers (provider readers, normalization, time/reset formatting, and common CLI plumbing: argument validation, run-dir logging, prompt loading, argv/JSON conversion) sourced by the CLIs.
+* Regression tests: `llm-usage-tests.sh` (covers all CLIs).
 * User docs: `README.md`
 * Runtime log: `llm-usage.log` beside the scripts when writable
 * Cache: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-usage`
 * Scheduler run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-scheduler/logs`
+* Ralph Robin run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/ralph-robin/logs`
+* Ralph Robin state: `${XDG_CACHE_HOME:-$HOME/.cache}/ralph-robin/state.json`
 
-Keep these as dependency-light Bash CLIs sharing one helper library: no build step, daemon, server, database, package framework, telemetry, or broad provider SDK design unless explicitly requested. Shared logic belongs in `lib/llm-common.sh`, not duplicated across the two CLIs.
+Keep these as dependency-light Bash CLIs sharing one helper library: no build step, daemon, server, database, package framework, telemetry, or broad provider SDK design unless explicitly requested. Shared logic belongs in `lib/llm-common.sh`, not duplicated across CLIs.
 
 ## Fast checks
 
 ```bash
-chmod +x llm-usage llm-scheduler llm-usage-tests.sh
+chmod +x llm-usage llm-scheduler ralph-robin llm-usage-tests.sh
 ./llm-usage
 ./llm-usage --json
 ./llm-usage --show-source --show-remaining-time
@@ -27,8 +30,9 @@ chmod +x llm-usage llm-scheduler llm-usage-tests.sh
 ./llm-usage --hide-codex-spark
 ./llm-scheduler --tool codex --prompt x --dry-run --command-template true
 ./llm-scheduler --wake-test
+./ralph-robin --prompt x --dry-run --command-template true
 ./llm-usage-tests.sh
-shellcheck -x llm-usage llm-scheduler lib/llm-common.sh   # must be clean at default severity
+shellcheck -x llm-usage llm-scheduler ralph-robin lib/llm-common.sh   # must be clean at default severity
 ```
 
 Statusline mode reads Claude statusline JSON from stdin:
