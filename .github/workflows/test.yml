@@ -10,19 +10,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare fake Copilot CLI
-        run: |
-          mkdir -p .ci-bin
-          printf '#!/usr/bin/env bash\nsleep 99\n' > .ci-bin/copilot
-          chmod +x .ci-bin/copilot
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Install test dependencies
         run: |
-          if ! command -v jq >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y jq tmux
-          fi
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest coverage
 
-      - name: Run tests
+      - name: Run tests with coverage
         run: |
-          PATH="$PWD/.ci-bin:$PATH" ./llm-usage-tests.sh
+          coverage run -m pytest
+          coverage combine
+          coverage report --fail-under=80

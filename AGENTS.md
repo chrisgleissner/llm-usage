@@ -2,26 +2,28 @@
 
 ## Scope
 
-This repo contains small Linux Bash CLIs for Codex, Claude Code, and GitHub Copilot:
+This repo contains small Linux Python CLIs for Codex, Claude Code, and GitHub Copilot:
 
 * `llm-usage` — show local usage/quota for each provider.
 * `llm-scheduler` — submit a prompt to a provider CLI once usage data says it is usable (optionally waking/suspending around a window reset).
 * `ralph-robin` — keep using one configured provider until it is exhausted, then rotate to the next provider and delegate launch/suspend behavior to `llm-scheduler`.
-* `lib/llm-common.sh` — shared helpers (provider readers, normalization, time/reset formatting, and common CLI plumbing: argument validation, run-dir logging, prompt loading, argv/JSON conversion) sourced by the CLIs.
-* Regression tests: `llm-usage-tests.sh` (covers all CLIs).
+* `llm_tools/common.py` — shared helpers (provider readers, normalization, time/reset formatting, subprocess execution, and common CLI plumbing: argument validation, run-dir logging, prompt loading, argv/JSON conversion).
+* Python modules: `llm_tools/usage.py`, `llm_tools/scheduler.py`, `llm_tools/ralph_robin.py`.
+* Public direct-run command files: `llm-usage`, `llm-scheduler`, `ralph-robin`.
+* Regression tests: `tests/` with pytest and fake provider commands.
 * User docs: `README.md`
-* Runtime data root: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools`, one subdirectory per tool. Legacy `~/.cache/llm-usage`, `~/.cache/llm-scheduler`, and `~/.cache/ralph-robin` dirs are auto-migrated by `migrate_legacy_cache_dirs` in `lib/llm-common.sh`.
+* Runtime data root: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools`, one subdirectory per tool. Legacy `~/.cache/llm-usage`, `~/.cache/llm-scheduler`, and `~/.cache/ralph-robin` dirs are auto-migrated by `migrate_legacy_cache_dirs` in `llm_tools/common.py`.
 * Usage cache and samples log: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-usage` (`claude-status.json`, `claude-usage-api.json`, `llm-usage.log`)
 * Scheduler run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-scheduler/logs`
 * Ralph Robin run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`
 * Ralph Robin state: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json`
 
-Keep these as dependency-light Bash CLIs sharing one helper library: no build step, daemon, server, database, package framework, telemetry, or broad provider SDK design unless explicitly requested. Shared logic belongs in `lib/llm-common.sh`, not duplicated across CLIs.
+Keep these as dependency-light Python CLIs sharing one helper module: no daemon, server, database, telemetry, or broad provider SDK design unless explicitly requested. Shared logic belongs in `llm_tools/common.py`, not duplicated across CLIs.
 
 ## Fast checks
 
 ```bash
-chmod +x llm-usage llm-scheduler ralph-robin llm-usage-tests.sh
+chmod +x llm-usage llm-scheduler ralph-robin
 ./llm-usage
 ./llm-usage --json
 ./llm-usage --show-source --show-remaining-time
@@ -31,8 +33,8 @@ chmod +x llm-usage llm-scheduler ralph-robin llm-usage-tests.sh
 ./llm-scheduler --tool codex --prompt x --dry-run --command-template true
 ./llm-scheduler --wake-test
 ./ralph-robin --prompt x --dry-run --command-template true
-./llm-usage-tests.sh
-shellcheck -x llm-usage llm-scheduler ralph-robin lib/llm-common.sh   # must be clean at default severity
+python -m pytest -q
+coverage run -m pytest && coverage combine && coverage report --fail-under=80
 ```
 
 Statusline mode reads Claude statusline JSON from stdin:
@@ -43,9 +45,9 @@ printf '%s\n' '{"rate_limits":{"five_hour":{"used_percentage":10}}}' | ./llm-usa
 
 ## Implementation map
 
-* CLI/setup: `usage`, `need`, argument parsing, `render_once`, watch dispatch
+* CLI/setup: module `main` functions, argument parsing, `render_once`, watch dispatch
 * Provider readers: `read_codex`, `read_claude_api`, `read_claude`, `read_copilot`
-* Normalization: `normalize_codex`, `normalize_claude`, Copilot parse helpers
+* Normalization: `normalize_codex_obj`, `normalize_claude_obj`, Copilot parse helpers
 * JSON: `json_for_provider`, `json_for_copilot`, JSON branch in `render_once`
 * Table rendering: `print_cell`, `print_value_row`, `print_row`, `print_unavailable_rows`, `print_codex_rows`, `print_copilot_rows`
 * Remaining-time logic: `log_usage_sample`, `estimate_remaining_time_from_log`
@@ -55,8 +57,7 @@ Prefer changing the smallest relevant function surface. Preserve existing functi
 
 ## Hard invariants
 
-* Keep `set -euo pipefail`.
-* Quote variables and use `local` in functions.
+* Keep Python code typed, explicit, and standard-library-first.
 * Missing data must degrade gracefully as `-`, `unknown`, or `unavailable`, never as empty cells or script failure.
 * One provider failing must not block other provider rows.
 * Table and JSON must agree on provider availability and values.
@@ -87,7 +88,7 @@ The PTY capture is slow (up to `LLM_USAGE_COPILOT_TIMEOUT` seconds), so `read_co
 
 ## Scheduler invariants
 
-* `llm-scheduler` gates on the same `lib/llm-common.sh` provider readers as `llm-usage`; tests inject usage via `LLM_SCHEDULER_USAGE_JSON` and the command via `--command-template`, never live providers.
+* `llm-scheduler` gates on the same `llm_tools.common` provider readers as `llm-usage`; tests inject usage via `LLM_SCHEDULER_USAGE_JSON` and the command via `--command-template`, never live providers.
 * A `rate-limited` decision (a known window with a real reset epoch) must wait for that reset, not proceed early.
 * An *undeterminable* decision (`unavailable`, `inconclusive-usage`, `unsupported-window`) must never block forever: bound the wait with `--max-unavailable-wait`, then launch optimistically. See `is_undetermined_reason`.
 * `--window` must be valid for the tool (copilot: auto/monthly; codex/claude: auto/5h/weekly). Reject other combinations in `validate_args`.
@@ -140,12 +141,12 @@ When changing behavior:
 
 1. Add or update the narrowest fixture assertion.
 2. Run a targeted command for the changed path.
-3. Run `./llm-usage-tests.sh`.
+3. Run `python -m pytest -q`.
 4. Update `README.md` for user-visible changes.
 
 ## Common failures
 
-* `unbound variable`: strict-mode bug, often optional JSON or estimator state.
+* `KeyError`, `TypeError`, or `ValueError`: optional JSON or estimator state bug.
 * Empty table cells: unavailable-provider path or remaining-time formatting bug.
 * Column shifts: header/rule/value width mismatch.
 * Copilot unexpectedly unavailable: PTY capture, timeout, trust prompt, footer regex, or auth state.
@@ -158,9 +159,10 @@ When changing behavior:
 
 A change is complete only when:
 
-* `./llm-usage --json | jq . >/dev/null` succeeds.
+* `./llm-usage --json` emits valid JSON.
 * `./llm-usage --show-source --show-remaining-time` has aligned columns and no empty cells.
-* `./llm-usage-tests.sh` prints `ok`.
+* `python -m pytest -q` passes.
+* `coverage run -m pytest && coverage combine && coverage report --fail-under=80` passes.
 * Missing-provider and timeout paths degrade gracefully.
 * Table, JSON, README, and tests are consistent for any user-visible change.
 * Generated files such as `llm-usage.log` are not committed.

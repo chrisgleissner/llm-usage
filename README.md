@@ -4,28 +4,22 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Platform](https://img.shields.io/badge/platform-Linux-lightgrey)](https://github.com/chrisgleissner/llm-tools/releases)
 
-Small Bash tools for local LLM CLI usage:
+Small command-line tools for local LLM CLI usage:
 
 - `llm-usage` shows remaining local usage for Codex, Claude Code, and GitHub Copilot.
 - `llm-scheduler` waits until one selected CLI appears usable again, then submits one prompt.
 - `ralph-robin` keeps using one configured CLI until its usage window is exhausted, then advances to the next configured CLI.
 
-The tools share provider detection code in `lib/llm-common.sh`; `llm-scheduler` does not reimplement the `llm-usage` parsers.
-
 ## Install
 
 ```bash
-install -m 755 llm-usage ~/.local/bin/llm-usage
-install -m 755 llm-scheduler ~/.local/bin/llm-scheduler
-install -m 755 ralph-robin ~/.local/bin/ralph-robin
-install -d ~/.local/bin/lib
-install -m 644 lib/llm-common.sh ~/.local/bin/lib/llm-common.sh
+python -m pip install .
 command -v llm-usage
 command -v llm-scheduler
 command -v ralph-robin
 ```
 
-If you keep the scripts in this repository, run them directly with `./llm-usage`, `./llm-scheduler`, and `./ralph-robin`. If you copy them elsewhere, keep `lib/llm-common.sh` beside the scripts under a `lib` directory.
+For an isolated install, use a virtual environment or `pipx install .` from the repository checkout. If you keep this repository checked out, you can also run the tools directly with `./llm-usage`, `./llm-scheduler`, and `./ralph-robin`.
 
 ## llm-usage
 
@@ -196,7 +190,7 @@ Provider-specific symlinks such as `latest-claude` and `latest-codex` point at t
 
 ## Requirements
 
-- Bash, `jq`, `curl`, GNU coreutils, `find`, `sort`, `tail`, `date`, `sha256sum`, `python3`.
+- Python 3.11 or newer.
 - Optional: `copilot` or `github-copilot` for Copilot usage capture.
 - Optional: `tmux` for scheduler tmux mode.
 - Optional: `systemd-run` or `rtcwake` for best-effort wake support.
@@ -230,10 +224,13 @@ llm-scheduler --wake-test
 Run:
 
 ```bash
-./llm-usage-tests.sh
+python -m pip install -e . pytest coverage
+coverage run -m pytest
+coverage combine
+coverage report --fail-under=80
 ```
 
-The tests use fixtures and mock commands; they do not require real Codex, Claude, Copilot, credentials, network access, or the user's real home directory.
+The tests use fixtures and mock commands; they do not require real Codex, Claude, Copilot, credentials, network access, or the user's real home directory. For manual end-to-end checks against installed providers, run the examples above without the test fixture environment.
 
 ## License
 
