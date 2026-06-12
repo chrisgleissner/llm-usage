@@ -7,13 +7,15 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Platform](https://img.shields.io/badge/platform-Linux-blue)](https://github.com/chrisgleissner/llm-tools/releases)
 
+Small Linux command-line tools for keeping local LLM CLIs productive, observable, and usable across rate-limit windows.
 
-Small command-line tools for local LLM CLI usage:
+## What Each Tool Is For
 
-- `llm-usage` shows remaining local usage for Codex, Claude Code, and GitHub Copilot.
-- `llm-scheduler` waits until one selected CLI appears usable again, then submits one prompt.
-- `ralph-robin` keeps using one configured CLI until its usage window is exhausted, then advances to the next configured CLI.
-
+| Tool            | Use it when you want to...                                                                                  |
+| --------------- | ----------------------------------------------------------------------------------------------------------- |
+| `llm-usage`     | See remaining local usage for Codex, Claude Code, and GitHub Copilot before starting work.                  |
+| `llm-scheduler` | Submit one prompt to one selected CLI as soon as that CLI has usable capacity.                              |
+| `ralph-robin`   | Keep autonomous work moving by rotating across configured CLIs instead of stopping at the first rate limit. |
 
 ## Install
 
@@ -24,11 +26,35 @@ command -v llm-scheduler
 command -v ralph-robin
 ```
 
-For an isolated install, use a virtual environment or `pipx install .` from the repository checkout. If you keep this repository checked out, you can also run the tools directly with `./llm-usage`, `./llm-scheduler`, and `./ralph-robin`.
+For an isolated install, use a virtual environment or `pipx install .` from the repository checkout.
 
-## llm-usage
+You can also run the tools directly from the checkout:
 
-`llm-usage` prints a compact snapshot of remaining quota windows:
+```bash
+./llm-usage
+./llm-scheduler
+./ralph-robin
+```
+
+## Quick Start
+
+```bash
+llm-usage
+llm-scheduler --tool codex --prompt-file task.md
+ralph-robin --prompt-file task.md
+llm-scheduler --tool claude --window 5h --prompt-file task.md --suspend-until-ready
+```
+
+Follow the latest scheduler run:
+
+```bash
+tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/run.log
+tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/attempt-1.out
+```
+
+## `llm-usage`
+
+Use `llm-usage` before starting work, in status lines, or in scripts that need a compact view of local usage state.
 
 ```bash
 llm-usage
@@ -39,35 +65,25 @@ llm-usage --show-source
 llm-usage --statusline
 ```
 
-Example table:
+Options:
 
-```log
-Tool             Window         Remaining    Remaining Time   Resets             Time to Reset
---------------   ------------   ----------   --------------   ----------------   ------------
-Codex            5h             100%         -                2026-06-02 23:59   4h 58m
-Codex            weekly         53%          -                2026-06-07 16:25   4d 21h
-Claude           5h             29%          -                2026-06-02 23:20   4h 19m
-Claude           weekly         58%          10m              2026-06-04 13:00   1d 17h
-Copilot          monthly        79%          -                2026-07-01 00:00   28d 4h
-```
+| Option                   | Purpose                                                                  |
+| ------------------------ | ------------------------------------------------------------------------ |
+| `--json`                 | Print stable JSON with `generated_at`, `codex`, `claude`, and `copilot`. |
+| `--watch/-w SECONDS`     | Refresh continuously.                                                    |
+| `--show-source`          | Show where each usage row came from.                                     |
+| `--show-copilot-credits` | Include Copilot AI credits when parseable.                               |
+| `--show-remaining-time`  | Show burn-time estimates.                                                |
+| `--hide-remaining-time`  | Hide burn-time estimates.                                                |
+| `--show-codex-spark`     | Show Codex Spark rows.                                                   |
+| `--hide-codex-spark`     | Hide Codex Spark rows.                                                   |
+| `--statusline`           | Read Claude Code statusline JSON from stdin and cache it.                |
 
-Important options:
+## `llm-scheduler`
 
-- `--json` prints machine-readable JSON with stable top-level keys: `generated_at`, `codex`, `claude`, `copilot`.
-- `--watch/-w SECONDS` refreshes continuously.
-- `--show-source` shows where each row was derived from.
-- `--show-copilot-credits` includes Copilot AI credits when parseable.
-- `--show-remaining-time` and `--hide-remaining-time` control burn-time estimation.
-- `--show-codex-spark` and `--hide-codex-spark` control Codex Spark rows.
-- `--statusline` reads Claude Code statusline JSON from stdin and caches it.
+Use `llm-scheduler` when one specific provider should run one specific prompt, but only once capacity is available.
 
-## llm-scheduler
-
-`llm-scheduler` submits a prompt once the selected CLI has known remaining capacity above a threshold. It runs once and exits after success, terminal failure, or retry exhaustion.
-
-In the default fresh mode on an interactive terminal, the provider CLI launches in its normal interactive form attached directly to that terminal — output, key input, window resizes, and Ctrl-C behave exactly as if you had run `claude`, `codex`, or `copilot` yourself. An ANSI-cleaned transcript is also written to the run directory (`attempt-N.out`).
-
-Without a terminal (pipes, cron, systemd resume), or with `--headless`, `LLM_SCHEDULER_HEADLESS=1`, or `LLM_SCHEDULER_NO_STREAM=1`, the non-interactive provider form runs on a captured PTY instead and its output streams to stdout (suppressed under `LLM_SCHEDULER_NO_STREAM=1`). In tmux mode the output appears in the tmux pane instead.
+It is best for delayed launches, rate-limit-aware retries, tmux launches, wake scheduling, and suspend-until-ready workflows.
 
 ```bash
 llm-scheduler --tool codex --prompt-file task.md
@@ -80,68 +96,69 @@ llm-scheduler --tool claude --prompt-file task.md --window 5h --suspend-until-re
 llm-scheduler --tool codex --prompt-file task.md --dry-run
 ```
 
-Required scheduler form:
+Required form:
 
 ```bash
 llm-scheduler --tool codex|claude|copilot (--prompt TEXT | --prompt-file FILE) [options]
 ```
 
-Scheduler options:
+Behavior:
 
-- `--at TIME` or `--not-before TIME` delays submission until a `date -d` compatible local time.
-- `--window auto|5h|weekly|monthly` chooses usage windows. `auto` checks all known Codex/Claude limiting windows and Copilot monthly usage.
-- `--min-remaining PERCENT` defaults to `1`.
-- `--poll-interval SECONDS` defaults to `60`.
-- `--max-unavailable-wait SECONDS` defaults to `900`. When usage data cannot be measured (no network, a transient API failure, or inconclusive/unsupported data — common right after resume-from-suspend), the scheduler keeps polling only up to this long, then launches optimistically and lets the tool's own rate-limit handling and `--retry-delays` take over. `0` waits forever. A known rate-limit with a real reset time is excluded and always waits for that reset.
-- `--retry-delays LIST` defaults to `60,180,600`; `--no-retry` disables retries.
-- `--cwd DIR` sets the target CLI working directory.
-- `--fresh` launches a fresh foreground CLI process and is the default.
-- `--headless` always uses the non-interactive provider command and captured PTY, even on a terminal.
-- `--tmux SESSION[:WINDOW]` runs through tmux, creating the session/window when practical.
-- `--command-template TEMPLATE` overrides CLI syntax. Placeholders are `{tool}`, `{prompt}`, `{prompt_file}`, and `{cwd}`. The template is tokenized with Python `shlex`; it is not evaluated by a shell.
-- `--auto-confirm` is enabled by default and only sends Return for recognised safe trust prompts. `--no-auto-confirm` disables it.
-- `--headless-idle-timeout SECONDS` defaults to `600` (`LLM_SCHEDULER_IDLE_TIMEOUT`). In headless fresh mode, abort the provider if no output progress is observed for this long; `0` disables the idle watchdog.
-- `--headless-question-timeout SECONDS` defaults to `30` (`LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT`). In headless fresh mode, abort if question-like output appears and then no further progress is observed; `0` disables this watchdog. Known blocking prompt UIs, such as spend-limit menus, abort immediately.
-- `--log-dir DIR` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-scheduler/logs`.
-- `--run-dir DIR` writes or resumes a specific run directory. This is mainly useful for wrappers and scheduled resume invocations that should keep all logs in one predictable place.
-- `--dry-run` resolves usage state, timing, command plan, and logs without submitting.
-- `--wake` enables best-effort wake scheduling.
-- `--suspend-until-ready` arms a transient user systemd timer with `WakeSystem=true` for the next reset/not-before time, prints a brief confirmation showing the wake time, tool, model source, prompt, and working directory, suspends the machine, and runs `llm-scheduler` again after wake. This is useful when you want the desktop to sleep until a provider window resets instead of keeping a polling process active.
-- `--wake-test` prints wake capability diagnostics without scheduling work.
+* Interactive terminal: launches the provider directly and writes `attempt-N.out`.
+* Headless or non-terminal mode: runs the provider through a captured PTY.
+* tmux mode: runs inside the requested tmux session/window.
+* Exits after success, terminal failure, or retry exhaustion.
 
-Example for a Claude 5-hour reset:
+Options:
+
+| Option                                | Purpose                                                                                                                                      |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--at TIME`                           | Delay launch until a `date -d` compatible local time.                                                                                        |
+| `--not-before TIME`                   | Do not launch before a `date -d` compatible local time.                                                                                      |
+| `--window auto\|5h\|weekly\|monthly`  | Select usage windows. `auto` checks known Codex and Claude limiting windows plus Copilot monthly usage.                                      |
+| `--min-remaining PERCENT`             | Minimum remaining capacity required to launch. Default: `1`.                                                                                 |
+| `--poll-interval SECONDS`             | Usage polling interval. Default: `60`.                                                                                                       |
+| `--max-unavailable-wait SECONDS`      | Maximum wait when usage cannot be measured. Default: `900`; `0` waits forever. Known rate limits with real reset times still wait for reset. |
+| `--retry-delays LIST`                 | Retry delays. Default: `60,180,600`.                                                                                                         |
+| `--no-retry`                          | Disable retries.                                                                                                                             |
+| `--cwd DIR`                           | Set provider working directory.                                                                                                              |
+| `--fresh`                             | Launch a fresh foreground provider process. Default.                                                                                         |
+| `--headless`                          | Force non-interactive provider command and captured PTY.                                                                                     |
+| `--tmux SESSION[:WINDOW]`             | Run through tmux.                                                                                                                            |
+| `--command-template TEMPLATE`         | Override provider syntax. Supports `{tool}`, `{prompt}`, `{prompt_file}`, and `{cwd}`. Parsed with Python `shlex`, not a shell.              |
+| `--auto-confirm`                      | Auto-confirm recognised safe trust prompts. Default.                                                                                         |
+| `--no-auto-confirm`                   | Disable safe auto-confirmation.                                                                                                              |
+| `--headless-idle-timeout SECONDS`     | Abort headless fresh mode after no output progress. Default: `600`; `0` disables.                                                            |
+| `--headless-question-timeout SECONDS` | Abort headless fresh mode after question-like output stalls. Default: `30`; `0` disables.                                                    |
+| `--log-dir DIR`                       | Set scheduler log root.                                                                                                                      |
+| `--run-dir DIR`                       | Write or resume a specific run directory.                                                                                                    |
+| `--dry-run`                           | Resolve usage, timing, command plan, and logs without launching.                                                                             |
+| `--wake`                              | Enable best-effort wake scheduling.                                                                                                          |
+| `--suspend-until-ready`               | Schedule a resumed run, enable wake, suspend the machine, and continue after wake.                                                           |
+| `--wake-test`                         | Print wake diagnostics without scheduling work.                                                                                              |
+
+Default provider commands:
+
+| Mode        | Codex                          | Claude Code                                              | GitHub Copilot                       |
+| ----------- | ------------------------------ | -------------------------------------------------------- | ------------------------------------ |
+| Interactive | `codex -C <cwd> <prompt>`      | `claude --dangerously-skip-permissions <prompt>`         | `copilot -C <cwd> -i <prompt>`       |
+| Headless    | `codex exec -C <cwd> <prompt>` | `claude --dangerously-skip-permissions --print <prompt>` | `copilot -C <cwd> --prompt <prompt>` |
+
+The default Claude adapter skips permission prompts so unattended runs cannot stall. To keep Claude Code’s normal permission checks:
 
 ```bash
-llm-scheduler --tool claude --window 5h --prompt-file task.md --suspend-until-ready
+llm-scheduler --tool claude --prompt-file task.md --command-template 'claude --print {prompt}'
 ```
 
-Default provider adapters, attached (interactive terminal):
+## `ralph-robin`
 
-- Codex: `codex -C <cwd> <prompt>`
-- Claude Code: `claude --dangerously-skip-permissions <prompt>` with the process working directory set to `--cwd`
-- GitHub Copilot: `copilot -C <cwd> -i <prompt>`
+Use `ralph-robin` when the task matters more than which LLM provider runs it.
 
-Default provider adapters, headless (no terminal, or `--headless`):
+It runs a [Ralph loop](https://venturebeat.com/technology/how-ralph-wiggum-went-from-the-simpsons-to-the-biggest-name-in-ai-right-now/): a persistent autonomous workflow that keeps going instead of stopping when one provider reaches a limit, stalls, or becomes temporarily unusable.
 
-- Codex: `codex exec -C <cwd> <prompt>`
-- Claude Code: `claude --dangerously-skip-permissions --print <prompt>` with the process working directory set to `--cwd`
-- GitHub Copilot: `copilot -C <cwd> --prompt <prompt>`
+`ralph-robin` wraps `llm-scheduler` and rotates across the configured providers. It can rotate only when the current provider is exhausted, or distribute work more evenly to burn down provider limits at a similar rate.
 
-The Claude adapter skips permission prompts so unattended runs cannot stall; use `--command-template 'claude --print {prompt}'` if you want Claude Code's normal permission checks instead.
-
-Use `--command-template` if an installed CLI changes syntax or you use a wrapper.
-
-## ralph-robin
-
-`ralph-robin` is a small rotation wrapper around `llm-scheduler`. It checks the configured tools in order, keeps using the current tool while it is still usable, tries another usable or undetermined tool before sleeping, and delegates the actual prompt launch, retry, wake, and suspend behavior to `llm-scheduler`.
-
-`ralph-robin` defaults to autonomous headless launches even from an interactive terminal. The scheduler uses the provider's non-interactive adapter when available, streams output to your terminal, and aborts/re-evaluates rotation if a provider stops making progress or presents an input prompt.
-
-On an interactive terminal, Ralph status lines and common streamed provider patterns such as diffs, command/tool-call lines, warnings, and errors are highlighted with ANSI color; streamed provider text is preserved without injected labels such as `STDERR`, `DIFF`, or `CMD`. Colors are disabled for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
-
-The default Ralph/scheduler palette uses the terminal default foreground plus green, blue, and teal ANSI colors chosen to remain readable on typical dark and light terminals. Override any role with `LLM_TOOLS_COLOR_<ROLE>` set to an ANSI SGR code, for example `LLM_TOOLS_COLOR_ERROR=1;34`. Supported roles are `BRAND`, `INFO`, `OK`, `WARN`, `ERROR`, `DIM`, `DIFF_ADD`, `DIFF_REMOVE`, `DIFF_HUNK`, `COMMAND`, `TOOL`, `STDERR`, and `HEADING`.
-
-Ralph status lines also use compact UTF-8 symbols so state remains distinguishable without relying only on color. Override a symbol with `LLM_TOOLS_SYMBOL_<ROLE>`, for example `LLM_TOOLS_SYMBOL_ERROR=!`, or set `LLM_TOOLS_NO_SYMBOLS=1` to keep color only.
+This makes it useful for long-running autonomous coding, repair, hardening, documentation, and investigation loops where stopping at the first rate limit would waste time.
 
 ```bash
 ralph-robin --prompt-file task.md
@@ -151,94 +168,170 @@ ralph-robin --prompt-file task.md --tmux llm-work
 ralph-robin --prompt-file task.md --dry-run
 ```
 
-Default rotation:
+Options:
+
+| Option               | Purpose                                                                                                    |
+| -------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `--tools LIST`       | Set comma-separated rotation. Values: `claude`, `codex`, `copilot`.                                        |
+| `--prompt TEXT`      | Prompt text passed to the selected provider.                                                               |
+| `--prompt-file FILE` | Prompt file passed to the selected provider.                                                               |
+| `--even-burn`        | Prefer the usable provider with the highest weekly remaining allowance per day. Enabled by default.         |
+| `--no-even-burn`     | Keep using the current provider until it is exhausted.                                                      |
+| `--state-file FILE`  | Store current provider index. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json`. |
+| `--log-dir DIR`      | Set Ralph log directory. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.            |
+
+Passed through to `llm-scheduler`:
 
 ```text
-claude -> codex -> claude -> ...
+--window
+--min-remaining
+--poll-interval
+--max-unavailable-wait
+--retry-delays
+--cwd
+--fresh
+--headless
+--tmux
+--command-template
+--auto-confirm
+--no-auto-confirm
+--headless-idle-timeout
+--headless-question-timeout
 ```
 
-Important options:
+Behavior:
 
-- `--tools LIST` sets the comma-separated rotation. Values are `claude`, `codex`, and `copilot`.
-- `--prompt TEXT` and `--prompt-file FILE` match `llm-scheduler`.
-- `--window`, `--min-remaining`, `--poll-interval`, `--max-unavailable-wait`, `--retry-delays`, `--cwd`, `--fresh`, `--headless`, `--tmux`, `--command-template`, `--auto-confirm`, `--no-auto-confirm`, `--headless-idle-timeout`, and `--headless-question-timeout` are passed through to `llm-scheduler`.
-- `--state-file FILE` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json` and stores the current provider index.
-- `--log-dir DIR` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.
+* Defaults to autonomous headless launches, even from an interactive terminal.
+* Defaults to even burn-down: when multiple providers are usable and have comparable weekly reset data, selects the highest `weekly remaining percentage / days until weekly reset`.
+* Use `--no-even-burn` to restore current-provider-until-exhausted rotation.
+* Streams provider output without injected labels.
+* Highlights status lines, diffs, commands, warnings, and errors on interactive terminals.
+* Disables colors for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
+* If all providers are known rate-limited, selects the earliest real reset and invokes `llm-scheduler --suspend-until-ready`.
+* If usage cannot be measured, tries that provider before suspending.
+* If a provider exits with a scheduler autonomy abort, skips it for the current invocation and tries the next usable provider.
+* If every provider blocks, exits with status `75` and leaves logs under the printed run directory.
 
-When every configured tool is known to be rate-limited, `ralph-robin` chooses the earliest real reset and invokes `llm-scheduler --suspend-until-ready` for that provider. If usage cannot be measured rather than being known exhausted, Ralph tries that provider path before suspending, and the scheduler's bounded unavailable wait behavior still applies.
-
-Before launching the selected provider, Ralph prepends a short runtime context to the prompt. It names the selected provider, lists the latest usage decisions, and tells the child to evaluate handoff/session-window instructions against the selected provider rather than a stale provider-specific scheduling command already present in the prompt.
-
-Provider processes launched by Ralph inherit `LLM_TOOLS_RALPH_ROBIN_ACTIVE=1`, `LLM_TOOLS_RALPH_ROBIN_SELECTED_TOOL`, and `LLM_TOOLS_RALPH_ROBIN_TOOLS`. If a child agent or script tries to run `llm-scheduler --suspend-until-ready` directly while that marker is present, the scheduler exits with status `75` instead of suspending. This keeps Ralph as the single rotation/suspend coordinator. `LLM_TOOLS_RALPH_ROBIN_ALLOW_SUSPEND=1` is reserved for explicit internal bypasses.
-
-If a selected provider exits with a scheduler autonomy abort, `ralph-robin` skips that provider for the current invocation, re-checks usage for the remaining tools, and launches the next usable provider. If every configured provider blocks this way, it exits with status `75` and leaves the logs under the printed run directory.
-
-## Logs and Cached Data
-
-All tools keep their runtime data under one root, `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools`, with one subdirectory per tool:
-
-- `llm-tools/llm-usage/` — Claude status/API caches (`claude-status.json`, `claude-usage-api.json`) and `llm-usage.log`, the usage-sample log that drives `Remaining Time` estimates.
-- `llm-tools/llm-scheduler/logs/` — per-run scheduler log directories.
-- `llm-tools/ralph-robin/` — rotation `state.json` and per-run `logs/`.
-
-`llm-scheduler` creates a per-run directory under `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-scheduler/logs` by default. It uses restrictive permissions where possible and writes:
-
-- `run.log` for human-readable audit output.
-- `events.jsonl` for machine-readable events.
-- `prompt.txt` containing the full prompt.
-- `attempt-N.out` and `attempt-N.status` for CLI output and exit status.
-
-The scheduler logs normalized arguments, prompt source, prompt SHA-256, full prompt content, usage snapshots, wait decisions, command plan, output, exit code, retry delays, and final status.
-
-For reconnecting from another shell, use the latest symlinks and attempt logs:
+Color overrides:
 
 ```bash
-tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/run.log
-tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/attempt-1.out
+LLM_TOOLS_COLOR_ERROR='1;34'
 ```
 
-Provider-specific symlinks such as `latest-claude` and `latest-codex` point at the most recent scheduler run for that provider. `ralph-robin` writes its own run log under `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs` and places the child scheduler logs in a `scheduler/` subdirectory of each `ralph-robin` run.
+Supported color roles:
+
+```text
+BRAND, INFO, OK, WARN, ERROR, DIM, DIFF_ADD, DIFF_REMOVE, DIFF_HUNK,
+COMMAND, TOOL, STDERR, HEADING
+```
+
+Symbol overrides:
+
+```bash
+LLM_TOOLS_SYMBOL_ERROR=!
+LLM_TOOLS_NO_SYMBOLS=1
+```
+
+Ralph-launched provider processes inherit:
+
+```text
+LLM_TOOLS_RALPH_ROBIN_ACTIVE=1
+LLM_TOOLS_RALPH_ROBIN_SELECTED_TOOL
+LLM_TOOLS_RALPH_ROBIN_TOOLS
+```
+
+If a child tries to run `llm-scheduler --suspend-until-ready` while Ralph is active, the scheduler exits with status `75` instead of suspending. Ralph remains the single rotation and suspend coordinator.
+
+## Logs and Cache
+
+Runtime data lives under:
+
+```text
+${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools
+```
+
+Layout:
+
+```text
+llm-tools/llm-usage/                 Usage caches and llm-usage.log
+llm-tools/llm-scheduler/logs/        Per-run scheduler logs
+llm-tools/ralph-robin/               Ralph state and logs
+```
+
+Each scheduler run directory contains:
+
+```text
+run.log
+events.jsonl
+prompt.txt
+attempt-N.out
+attempt-N.status
+```
+
+The scheduler logs arguments, prompt source, prompt SHA-256, prompt content, usage snapshots, wait decisions, command plan, output, exit code, retry delays, and final status.
+
+Useful symlinks:
+
+```text
+~/.cache/llm-tools/llm-scheduler/logs/latest
+~/.cache/llm-tools/llm-scheduler/logs/latest-claude
+~/.cache/llm-tools/llm-scheduler/logs/latest-codex
+```
+
+Ralph logs live under:
+
+```text
+${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs
+```
+
+Child scheduler logs are written under each Ralph run’s `scheduler/` subdirectory.
 
 ## Data Sources
 
-- Codex: local JSONL under `~/.codex/sessions`.
-- Claude Code: OAuth usage API/cache, statusline cache, then local project JSONL fallback.
-- GitHub Copilot: local Copilot CLI footer captured through a bounded PTY helper. Because the capture is slow, results are cached (`LLM_USAGE_COPILOT_CACHE_TTL`, default 300s) and refreshed by a detached background capture, so `llm-usage` never blocks on it; set `LLM_USAGE_COPILOT_CACHE_TTL=0` to force a synchronous capture.
+* Codex: local JSONL under `~/.codex/sessions`.
+* Claude Code: OAuth usage API/cache, statusline cache, then local project JSONL fallback.
+* GitHub Copilot: local Copilot CLI footer captured through a bounded PTY helper.
 
-## Requirements
+Copilot capture is cached with `LLM_USAGE_COPILOT_CACHE_TTL`. Default: `300`. Set `LLM_USAGE_COPILOT_CACHE_TTL=0` to force synchronous capture.
 
-- Python 3.11 or newer.
-- Optional: `copilot` or `github-copilot` for Copilot usage capture.
-- Optional: `tmux` for scheduler tmux mode.
-- Optional: `systemd-run` or `rtcwake` for best-effort wake support.
+## Wake Support
 
-## Wake Limitations
+`llm-scheduler --wake` is best effort. It prefers a transient user `systemd-run` timer with `WakeSystem=true`; otherwise it logs an `rtcwake` fallback command.
 
-`llm-scheduler --wake` is best effort. It prefers a transient user `systemd-run` timer with `WakeSystem=true` when available and logs an `rtcwake` fallback command that the user can run manually if privileges are required.
+`llm-scheduler --suspend-until-ready` schedules a resumed scheduler invocation, then calls `systemctl suspend` after the timer is accepted.
 
-`llm-scheduler --suspend-until-ready` uses the same systemd wake timer mechanism, but schedules a resumed scheduler invocation and then calls `systemctl suspend` after the timer is accepted. If the machine suspends later by itself, the already-armed timer can still wake it for the scheduled run.
+Configure the pre-suspend confirmation pause:
 
-Set `LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS` to change the default 5-second confirmation pause before `systemctl suspend`.
+```bash
+LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS=10
+```
 
-Wake from suspend depends on firmware/BIOS settings, motherboard RTC support, kernel support, systemd user timers, and power state. The tool does not modify BIOS/UEFI settings and does not silently require `sudo`.
+Wake reliability depends on firmware/BIOS settings, motherboard RTC support, kernel support, systemd user timers, and power state. The tool does not modify BIOS/UEFI settings and does not silently require `sudo`.
 
-Run diagnostics with:
+Diagnostics:
 
 ```bash
 llm-scheduler --wake-test
 ```
 
+## Requirements
+
+* Python 3.11 or newer.
+* Optional: `copilot` or `github-copilot` for Copilot usage capture.
+* Optional: `tmux` for tmux mode.
+* Optional: `systemd-run` or `rtcwake` for wake support.
+
 ## Limitations
 
-- These tools can only use local data and local authenticated CLIs.
-- They are not official billing dashboards.
-- Missing or inconclusive provider data degrades to `-`, `unknown`, or `unavailable`; the scheduler keeps polling but, rather than blocking forever, launches optimistically once `--max-unavailable-wait` is exceeded (a known rate-limit still waits for its real reset time).
-- Provider local data formats and CLI syntax can change.
-- Copilot AI credits are parsed when requested by `llm-usage`, but scheduler gating uses monthly remaining usage unless later configured otherwise.
+* Uses local data and locally authenticated CLIs only.
+* Not an official billing dashboard.
+* Missing or inconclusive provider data is shown as `-`, `unknown`, or `unavailable`.
+* If usage remains unavailable beyond `--max-unavailable-wait`, the scheduler launches optimistically and lets provider rate-limit handling and retry behavior take over.
+* Known rate limits with real reset times still wait for reset.
+* Provider local data formats and CLI syntax can change.
+* Copilot AI credits are parsed when requested, but scheduler gating currently uses monthly remaining usage.
 
 ## Tests
-
-Run:
 
 ```bash
 python -m pip install -e . pytest coverage
@@ -247,7 +340,9 @@ coverage combine
 coverage report --fail-under=80
 ```
 
-The tests use fixtures and mock commands; they do not require real Codex, Claude, Copilot, credentials, network access, or the user's real home directory. For manual end-to-end checks against installed providers, run the examples above without the test fixture environment.
+Tests use fixtures and mock commands. They do not require real Codex, Claude, Copilot, credentials, network access, or the user’s real home directory.
+
+For manual end-to-end checks, run the examples above against installed providers without the test fixture environment.
 
 ## License
 

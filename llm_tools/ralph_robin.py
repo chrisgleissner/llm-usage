@@ -17,8 +17,9 @@ APP_NAME = "ralph-robin"
 USAGE = """Usage: ralph-robin (--prompt TEXT | --prompt-file FILE) [options]
 
 Round-robin prompt submission across local LLM CLIs. By default it keeps using
-Claude while usable, switches to Codex when Claude is exhausted, then switches
-back after Codex is exhausted.
+the usable provider with the highest weekly remaining allowance per day, so
+weekly quotas burn down more evenly. Disable this with --no-even-burn to keep
+using the current provider until it is exhausted.
 
 By default the selected CLI uses llm-scheduler's autonomous headless adapter
 even from an interactive terminal. This avoids provider prompts blocking the
@@ -43,6 +44,9 @@ Options:
                               launch (default: 900; 0 waits forever).
   --retry-delays LIST         Comma-separated retry delays (default: 60,180,600).
   --no-retry                  Disable retries after failed submission.
+  --even-burn                 Prefer the usable tool with the highest weekly
+                              remaining allowance per day (default).
+  --no-even-burn              Keep using the current provider until exhausted.
   --cwd DIR                   Working directory for the target CLI (default: current directory).
   --fresh                     Launch a fresh CLI process through llm-scheduler (default).
   --headless                  Always use the non-interactive provider command
@@ -89,6 +93,7 @@ class RalphConfig:
     wake: bool = False
     suspend_until_ready: bool = False
     dry_run: bool = False
+    even_burn: bool = True
 
 
 def trim(value: str) -> str:
@@ -231,6 +236,12 @@ def parse_args(argv: list[str]) -> RalphConfig:
         elif arg == "--no-retry":
             cfg.retry_delays = ""
             i += 1
+        elif arg == "--even-burn":
+            cfg.even_burn = True
+            i += 1
+        elif arg == "--no-even-burn":
+            cfg.even_burn = False
+            i += 1
         elif arg == "--cwd":
             cfg.cwd = need_value("--cwd requires a directory")
         elif arg == "--fresh":
@@ -315,6 +326,7 @@ def safe_args_json(cfg: RalphConfig) -> dict[str, Any]:
         "dry_run": cfg.dry_run,
         "wake": cfg.wake,
         "suspend_until_ready": cfg.suspend_until_ready,
+        "even_burn": cfg.even_burn,
     }
 
 
@@ -355,6 +367,49 @@ def save_state(cfg: RalphConfig, selected_index: int, selected_tool: str) -> Non
         pass
 
 
+def rotation_order_indices(length: int, current_index: int) -> list[int]:
+    return [(current_index + i) % length for i in range(length)]
+
+
+def weekly_allowance_per_day(decision: dict[str, Any], env: dict[str, str] | None = None) -> float | None:
+    env = env or os.environ
+    windows = decision.get("windows")
+    if not isinstance(windows, list):
+        return None
+    for window in windows:
+        if not isinstance(window, dict) or window.get("name") != "weekly":
+            continue
+        remaining = window.get("remaining")
+        reset_epoch = window.get("reset_epoch")
+        if not isinstance(remaining, (int, float)) or not isinstance(reset_epoch, int):
+            return None
+        seconds_until_reset = reset_epoch - common.now_epoch(env)
+        if seconds_until_reset <= 0:
+            return None
+        days_until_reset = seconds_until_reset / 86400.0
+        return float(remaining) / days_until_reset
+    return None
+
+
+def even_burn_index(cfg: RalphConfig, decisions: list[dict[str, Any]], current_index: int, skipped: set[str]) -> int | None:
+    usable_indices = [
+        i
+        for i, decision in enumerate(decisions)
+        if decision.get("usable") is True and cfg.tools[i] not in skipped
+    ]
+    if len(usable_indices) < 2:
+        return None
+    scored: list[tuple[float, int, int]] = []
+    rotation_rank = {idx: rank for rank, idx in enumerate(rotation_order_indices(len(cfg.tools), current_index))}
+    for i in usable_indices:
+        score = weekly_allowance_per_day(decisions[i])
+        if score is None:
+            return None
+        scored.append((score, -rotation_rank[i], i))
+    scored.sort(reverse=True)
+    return scored[0][2] if scored else None
+
+
 def select_tool(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skipped: set[str]) -> dict[str, Any]:
     decisions: list[dict[str, Any]] = []
     for tool in cfg.tools:
@@ -363,6 +418,17 @@ def select_tool(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skip
         decisions.append(decision)
         common.log_event(logs, "usage_snapshot", {"tool": tool, "snapshot": snapshot})
         common.log_event(logs, "usage_decision", decision)
+    if cfg.even_burn:
+        balanced_index = even_burn_index(cfg, decisions, current_index, skipped)
+        if balanced_index is not None:
+            return {
+                "index": balanced_index,
+                "tool": cfg.tools[balanced_index],
+                "rotation_reason": "even-burn",
+                "all_rate_limited": False,
+                "decision": decisions[balanced_index],
+                "decisions": decisions,
+            }
     if decisions[current_index].get("usable") is True and cfg.tools[current_index] not in skipped:
         return {"index": current_index, "tool": cfg.tools[current_index], "rotation_reason": "current-usable", "all_rate_limited": False, "decision": decisions[current_index], "decisions": decisions}
     for i in range(1, len(cfg.tools)):

@@ -493,6 +493,34 @@ def test_validation_and_selection_edge_branches(tmp_path: Path, monkeypatch: pyt
     assert sel3["all_rate_limited"] is False
 
 
+def test_ralph_even_burn_prefers_highest_weekly_allowance_per_day(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg = ralph_robin.RalphConfig(tools_spec="claude,codex", tools=["claude", "codex"], state_file=tmp_path / "state.json")
+    logs = common.setup_run_logs(tmp_path / "logs", "r")
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    snapshots = {
+        "claude": {
+            "available": True,
+            "five_hour": {"remaining": 80},
+            "week": {"remaining": 80, "resets_at": 1000 + (5 * 86400)},
+        },
+        "codex": {
+            "available": True,
+            "five_hour": {"remaining": 50},
+            "week": {"remaining": 50, "resets_at": 1000 + (2 * 86400)},
+        },
+    }
+    monkeypatch.setattr(common, "usage_snapshot_for_tool", lambda tool: snapshots[tool])
+
+    selected = ralph_robin.select_tool(cfg, logs, 0, set())
+    assert selected["tool"] == "codex"
+    assert selected["rotation_reason"] == "even-burn"
+
+    cfg.even_burn = False
+    old_rotation = ralph_robin.select_tool(cfg, logs, 0, set())
+    assert old_rotation["tool"] == "claude"
+    assert old_rotation["rotation_reason"] == "current-usable"
+
+
 def test_scheduler_more_system_edges(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     logs = common.setup_run_logs(tmp_path / "logs", "s")
     cfg = scheduler.SchedulerConfig(tool="claude", prompt_text="p", cwd=str(tmp_path), log_dir=tmp_path / "logs", run_dir=logs.run_dir)
