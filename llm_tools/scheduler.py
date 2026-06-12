@@ -105,7 +105,7 @@ class SchedulerConfig:
     wake: bool = False
     wake_test: bool = False
     suspend_until_ready: bool = False
-    pre_suspend_confirmation_seconds: int = field(default_factory=lambda: int(os.environ.get("LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS", "5") or "5"))
+    pre_suspend_confirmation_seconds: int = 5
     wake_armed_target: int = 0
     exact_stdout: bool = False
 
