@@ -2,26 +2,34 @@
 
 ## Scope
 
-This repo contains small Linux Bash CLIs for Codex, Claude Code, and GitHub Copilot:
+This repo contains small Linux Python CLIs for Codex, Claude Code, and GitHub Copilot:
 
 * `llm-usage` — show local usage/quota for each provider.
 * `llm-scheduler` — submit a prompt to a provider CLI once usage data says it is usable (optionally waking/suspending around a window reset).
 * `ralph-robin` — keep using one configured provider until it is exhausted, then rotate to the next provider and delegate launch/suspend behavior to `llm-scheduler`.
-* `lib/llm-common.sh` — shared helpers (provider readers, normalization, time/reset formatting, and common CLI plumbing: argument validation, run-dir logging, prompt loading, argv/JSON conversion) sourced by the CLIs.
-* Regression tests: `llm-usage-tests.sh` (covers all CLIs).
-* User docs: `README.md`
-* Runtime data root: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools`, one subdirectory per tool. Legacy `~/.cache/llm-usage`, `~/.cache/llm-scheduler`, and `~/.cache/ralph-robin` dirs are auto-migrated by `migrate_legacy_cache_dirs` in `lib/llm-common.sh`.
+* `llm_tools/common.py` — shared helpers (provider readers, normalization, time/reset formatting, subprocess execution, usage decisions, PTY capture, wake diagnostics, and common CLI plumbing: argument validation, run-dir logging, prompt loading, argv/JSON conversion).
+* Python modules: `llm_tools/usage.py`, `llm_tools/scheduler.py`, `llm_tools/ralph_robin.py`, `llm_tools/copilot_refresh.py`, and package marker `llm_tools/__init__.py`.
+* Public direct-run command files: `llm-usage`, `llm-scheduler`, `ralph-robin`.
+* Regression tests: `tests/` with pytest and fake provider commands.
+* Test helpers: `tests/conftest.py`; main suites: `tests/test_contracts.py`, `tests/test_additional_paths.py`.
+* Project/package config: `pyproject.toml`.
+* Import/test bootstrap: `sitecustomize.py`.
+* CI: `.github/workflows/test.yml`.
+* User docs: `README.md`.
+* Local planning/work logs: `PLANS.md`, `WORKLOG.md`.
+* Runtime data root: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools`, one subdirectory per tool. Legacy `~/.cache/llm-usage`, `~/.cache/llm-scheduler`, and `~/.cache/ralph-robin` dirs are auto-migrated by `migrate_legacy_cache_dirs` in `llm_tools/common.py`.
 * Usage cache and samples log: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-usage` (`claude-status.json`, `claude-usage-api.json`, `llm-usage.log`)
+* Copilot background refresh helper: `llm_tools/copilot_refresh.py`, launched by `read_copilot` for detached cache refreshes.
 * Scheduler run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-scheduler/logs`
 * Ralph Robin run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`
 * Ralph Robin state: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json`
 
-Keep these as dependency-light Bash CLIs sharing one helper library: no build step, daemon, server, database, package framework, telemetry, or broad provider SDK design unless explicitly requested. Shared logic belongs in `lib/llm-common.sh`, not duplicated across CLIs.
+Keep these as dependency-light Python CLIs sharing one helper module: no daemon, server, database, telemetry, or broad provider SDK design unless explicitly requested. Shared logic belongs in `llm_tools/common.py`, not duplicated across CLIs.
 
 ## Fast checks
 
 ```bash
-chmod +x llm-usage llm-scheduler ralph-robin llm-usage-tests.sh
+chmod +x llm-usage llm-scheduler ralph-robin
 ./llm-usage
 ./llm-usage --json
 ./llm-usage --show-source --show-remaining-time
@@ -31,8 +39,8 @@ chmod +x llm-usage llm-scheduler ralph-robin llm-usage-tests.sh
 ./llm-scheduler --tool codex --prompt x --dry-run --command-template true
 ./llm-scheduler --wake-test
 ./ralph-robin --prompt x --dry-run --command-template true
-./llm-usage-tests.sh
-shellcheck -x llm-usage llm-scheduler ralph-robin lib/llm-common.sh   # must be clean at default severity
+python -m pytest -q
+coverage run -m pytest && coverage combine && coverage report --fail-under=80
 ```
 
 Statusline mode reads Claude statusline JSON from stdin:
@@ -43,25 +51,28 @@ printf '%s\n' '{"rate_limits":{"five_hour":{"used_percentage":10}}}' | ./llm-usa
 
 ## Implementation map
 
-* CLI/setup: `usage`, `need`, argument parsing, `render_once`, watch dispatch
+* CLI/setup: module `main` functions, argument parsing, `render_once`, watch dispatch
 * Provider readers: `read_codex`, `read_claude_api`, `read_claude`, `read_copilot`
-* Normalization: `normalize_codex`, `normalize_claude`, Copilot parse helpers
+* Normalization: `normalize_codex_obj`, `normalize_claude_obj`, Copilot parse helpers
 * JSON: `json_for_provider`, `json_for_copilot`, JSON branch in `render_once`
 * Table rendering: `print_cell`, `print_value_row`, `print_row`, `print_unavailable_rows`, `print_codex_rows`, `print_copilot_rows`
 * Remaining-time logic: `log_usage_sample`, `estimate_remaining_time_from_log`
 * Time/reset formatting: `now_epoch`, `parse_epoch`, `fmt_reset`, `fmt_duration`, `time_until`
+* Scheduler gates and launch: `usage_decision_for_tool`, `wait_until_usable`, `schedule_resume_and_suspend`, `command_argv`, `submit_once`, `run_fresh_headless`, `run_fresh_exact_stdout`, `run_tmux`
+* Ralph Robin rotation: `select_tool`, `scheduler_config_for`, `run_scheduler_inline`, state helpers, status/highlight helpers
 
 Prefer changing the smallest relevant function surface. Preserve existing function boundaries unless a helper clearly reduces duplication or risk.
 
 ## Hard invariants
 
-* Keep `set -euo pipefail`.
-* Quote variables and use `local` in functions.
+* Keep Python code typed, explicit, and standard-library-first.
 * Missing data must degrade gracefully as `-`, `unknown`, or `unavailable`, never as empty cells or script failure.
 * One provider failing must not block other provider rows.
 * Table and JSON must agree on provider availability and values.
 * Keep at least three visible spaces between table columns.
-* Keep color disabled for non-TTY output, `TERM=dumb`, or `LLM_USAGE_NO_COLOR`.
+* Keep color disabled for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
+* Ralph/scheduler highlighting should default to a readable green/blue/teal palette that works on typical dark and light terminals. Keep colors centralized in `common.ANSI_COLOR_ROLES` and configurable through `LLM_TOOLS_COLOR_<ROLE>` rather than hard-coding ANSI codes at call sites.
+* Ralph/scheduler live output may use compact UTF-8 symbols to distinguish status, command, tool-call, stderr, diff hunk, and error blocks. Keep symbols centralized in `common.UTF_SYMBOL_ROLES`, configurable through `LLM_TOOLS_SYMBOL_<ROLE>`, and suppressible with `LLM_TOOLS_NO_SYMBOLS=1`.
 * Keep JSON top-level keys stable: `generated_at`, `codex`, `claude`, `copilot`.
 * Keep Copilot unavailable shape explicit: `available:false`, with `reason` when known.
 * Keep option semantics stable: `--show-source`, `--hide-source`, `--show-remaining-time`, `--hide-remaining-time`, `--show-codex-spark`, `--hide-codex-spark`, `--show-copilot-credits`.
@@ -87,7 +98,7 @@ The PTY capture is slow (up to `LLM_USAGE_COPILOT_TIMEOUT` seconds), so `read_co
 
 ## Scheduler invariants
 
-* `llm-scheduler` gates on the same `lib/llm-common.sh` provider readers as `llm-usage`; tests inject usage via `LLM_SCHEDULER_USAGE_JSON` and the command via `--command-template`, never live providers.
+* `llm-scheduler` gates on the same `llm_tools.common` provider readers as `llm-usage`; tests inject usage via `LLM_SCHEDULER_USAGE_JSON` and the command via `--command-template`, never live providers.
 * A `rate-limited` decision (a known window with a real reset epoch) must wait for that reset, not proceed early.
 * An *undeterminable* decision (`unavailable`, `inconclusive-usage`, `unsupported-window`) must never block forever: bound the wait with `--max-unavailable-wait`, then launch optimistically. See `is_undetermined_reason`.
 * `--window` must be valid for the tool (copilot: auto/monthly; codex/claude: auto/5h/weekly). Reject other combinations in `validate_args`.
@@ -95,6 +106,7 @@ The PTY capture is slow (up to `LLM_USAGE_COPILOT_TIMEOUT` seconds), so `read_co
 * Under `--wake`, arm at most one OS wake timer per distinct, far-enough target (`log_wake_plan` lead guard + `WAKE_ARMED_TARGET`); never one per poll iteration.
 * Never log secrets; prompt copies live under the run dir with `600`/`700` perms.
 * Fresh mode on an interactive terminal runs the provider CLI in its normal interactive form on a PTY wired directly to that terminal via `script(1)` (`resolve_attach_mode`, `ATTACHED=1`): output, stdin, resizes, and Ctrl-C must behave exactly as a direct CLI launch. Headless fresh mode (no TTY, `--headless`, `LLM_SCHEDULER_HEADLESS=1`, or `LLM_SCHEDULER_NO_STREAM=1`) keeps the non-interactive provider commands and streams the child output live to the scheduler's stdout (and through `ralph-robin` to the invoking terminal) unless `LLM_SCHEDULER_NO_STREAM=1`. Both paths write the ANSI-cleaned copy to `attempt-N.out`. Attached runs never retry on a clean exit or user cancel (130/143) and skip the rate-limit phrase grep, since interactive screen content can legitimately mention rate limits. Headless runs must abort with status `75` when a blocking prompt UI is detected, when question-like output stalls, or when there is no output progress past `LLM_SCHEDULER_IDLE_TIMEOUT`; `ralph-robin` must treat status `75` as a reason to re-evaluate rotation, not as a final failure after the first provider. Tests extract the run dir from the `logs written to` stdout line, never via `awk '{print $NF}'` over all lines.
+* Ralph must prepend provider-aware runtime context before launching a selected provider. That context must identify the selected provider, list latest usage decisions, and override stale provider-specific handoff/scheduler instructions in the original prompt so Codex does not hand off merely because Claude is exhausted, and vice versa.
 
 ## Environment knobs
 
@@ -129,6 +141,13 @@ Important knobs that tests or users may rely on:
 * `LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT` (headless question watchdog; abort when question-like output stops progressing for this many seconds; 0 disables)
 * `LLM_SCHEDULER_TMUX_TIMEOUT` (tmux completion timeout, seconds)
 * `LLM_SCHEDULER_WAKE_MIN_LEAD` (min seconds before a target to bother arming an OS wake timer)
+* `LLM_TOOLS_COLOR_<ROLE>` (override one Ralph/scheduler ANSI SGR color role; roles: `BRAND`, `INFO`, `OK`, `WARN`, `ERROR`, `DIM`, `DIFF_ADD`, `DIFF_REMOVE`, `DIFF_HUNK`, `COMMAND`, `TOOL`, `STDERR`, `HEADING`)
+* `LLM_TOOLS_SYMBOL_<ROLE>` (override one Ralph/scheduler UTF-8 symbol role; same roles as `LLM_TOOLS_COLOR_<ROLE>`)
+* `LLM_TOOLS_NO_SYMBOLS` (disable Ralph/scheduler live-output symbols while keeping color enabled)
+* `LLM_TOOLS_RALPH_ROBIN_ACTIVE` (internal/inherited guard: provider subprocesses launched by `ralph-robin` set this to prevent child `llm-scheduler --suspend-until-ready` calls from suspending outside Ralph's all-providers-exhausted decision)
+* `LLM_TOOLS_RALPH_ROBIN_SELECTED_TOOL` (internal/inherited context: provider selected by Ralph for the current child run)
+* `LLM_TOOLS_RALPH_ROBIN_TOOLS` (internal/inherited context: comma-separated Ralph rotation for the current child run)
+* `LLM_TOOLS_RALPH_ROBIN_ALLOW_SUSPEND` (internal/test bypass for the inherited Ralph suspend guard)
 
 Document any new user-facing or test-facing variable here and in `README.md` when appropriate.
 
@@ -140,12 +159,15 @@ When changing behavior:
 
 1. Add or update the narrowest fixture assertion.
 2. Run a targeted command for the changed path.
-3. Run `./llm-usage-tests.sh`.
-4. Update `README.md` for user-visible changes.
+3. Run `python -m pytest -q`.
+4. Run coverage and require at least 80% total coverage: `coverage run -m pytest && coverage combine && coverage report --fail-under=80`.
+5. Update `README.md` for user-visible changes.
+
+Do not consider work done, even for small changes, unless the coverage gate has run and passed at `--fail-under=80`. If `coverage` is not installed in the active interpreter, use a temporary virtual environment or otherwise report the dependency/environment blocker explicitly.
 
 ## Common failures
 
-* `unbound variable`: strict-mode bug, often optional JSON or estimator state.
+* `KeyError`, `TypeError`, or `ValueError`: optional JSON or estimator state bug.
 * Empty table cells: unavailable-provider path or remaining-time formatting bug.
 * Column shifts: header/rule/value width mismatch.
 * Copilot unexpectedly unavailable: PTY capture, timeout, trust prompt, footer regex, or auth state.
@@ -158,9 +180,10 @@ When changing behavior:
 
 A change is complete only when:
 
-* `./llm-usage --json | jq . >/dev/null` succeeds.
+* `./llm-usage --json` emits valid JSON.
 * `./llm-usage --show-source --show-remaining-time` has aligned columns and no empty cells.
-* `./llm-usage-tests.sh` prints `ok`.
+* `python -m pytest -q` passes.
+* `coverage run -m pytest && coverage combine && coverage report --fail-under=80` passes with total coverage at or above 80%; this is mandatory for completion.
 * Missing-provider and timeout paths degrade gracefully.
 * Table, JSON, README, and tests are consistent for any user-visible change.
 * Generated files such as `llm-usage.log` are not committed.

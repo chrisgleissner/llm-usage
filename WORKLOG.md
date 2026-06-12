@@ -1,5 +1,21 @@
 llm-scheduler worklog
 
+2026-06-12: Started Python-only migration task.
+- Replaced the previous scheduler-specific `PLANS.md` with the required migration plan.
+- Current next step: discovery of current Bash tools, helper library, tests, docs, CI, external invocations, environment variables, file I/O, and visible stdout/stderr behavior before changing implementation behavior.
+
+2026-06-12: Completed Python implementation and validation.
+- Added Python package `llm_tools` with shared helpers in `common.py` and tool modules `usage.py`, `scheduler.py`, and `ralph_robin.py`.
+- Replaced the three public command files with Python entry scripts and added `pyproject.toml` console scripts.
+- Removed obsolete Bash helper `lib/llm-common.sh` and shell regression runner `llm-usage-tests.sh`.
+- Added pytest contract/unit tests under `tests/` with fake provider commands and subprocess coverage support through `sitecustomize.py`.
+- Added `.gitignore` for Python caches, coverage files, virtualenvs, build outputs, and local generated artifacts.
+- Updated GitHub Actions to run Python 3.11 tests with coverage enforcement.
+- Updated README installation, requirements, and testing instructions for the Python package layout.
+- Behavioural note: Ralph Robin now keeps its own status/selection diagnostics on stderr so stdout can remain exact provider chat output in passthrough scenarios.
+- Validation: `python -m pytest -q` passed: 23 tests.
+- Validation: `/tmp/llm-tools-venv/bin/coverage run -m pytest && /tmp/llm-tools-venv/bin/coverage combine && /tmp/llm-tools-venv/bin/coverage report --fail-under=80` passed with total coverage 81%.
+
 2026-06-12: Attached terminal mode — fresh runs now show the real CLI experience.
 - Problem: `ralph-robin --prompt-file …` from a terminal showed nothing until Ctrl-C (Python PTY relay + `claude --print`, which emits no output until completion), then died with a KeyboardInterrupt traceback.
 - Fresh mode on an interactive terminal (`resolve_attach_mode`) now runs the provider CLI in its normal interactive form (`claude --dangerously-skip-permissions <prompt>`, `codex -C <cwd> <prompt>`, `copilot -C <cwd> -i <prompt>`) on a PTY wired directly to the terminal via `script(1)` — output, stdin, resizes, and Ctrl-C are byte-for-byte identical to a direct launch.

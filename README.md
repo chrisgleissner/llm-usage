@@ -4,28 +4,22 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Platform](https://img.shields.io/badge/platform-Linux-lightgrey)](https://github.com/chrisgleissner/llm-tools/releases)
 
-Small Bash tools for local LLM CLI usage:
+Small command-line tools for local LLM CLI usage:
 
 - `llm-usage` shows remaining local usage for Codex, Claude Code, and GitHub Copilot.
 - `llm-scheduler` waits until one selected CLI appears usable again, then submits one prompt.
 - `ralph-robin` keeps using one configured CLI until its usage window is exhausted, then advances to the next configured CLI.
 
-The tools share provider detection code in `lib/llm-common.sh`; `llm-scheduler` does not reimplement the `llm-usage` parsers.
-
 ## Install
 
 ```bash
-install -m 755 llm-usage ~/.local/bin/llm-usage
-install -m 755 llm-scheduler ~/.local/bin/llm-scheduler
-install -m 755 ralph-robin ~/.local/bin/ralph-robin
-install -d ~/.local/bin/lib
-install -m 644 lib/llm-common.sh ~/.local/bin/lib/llm-common.sh
+python -m pip install .
 command -v llm-usage
 command -v llm-scheduler
 command -v ralph-robin
 ```
 
-If you keep the scripts in this repository, run them directly with `./llm-usage`, `./llm-scheduler`, and `./ralph-robin`. If you copy them elsewhere, keep `lib/llm-common.sh` beside the scripts under a `lib` directory.
+For an isolated install, use a virtual environment or `pipx install .` from the repository checkout. If you keep this repository checked out, you can also run the tools directly with `./llm-usage`, `./llm-scheduler`, and `./ralph-robin`.
 
 ## llm-usage
 
@@ -66,7 +60,9 @@ Important options:
 
 `llm-scheduler` submits a prompt once the selected CLI has known remaining capacity above a threshold. It runs once and exits after success, terminal failure, or retry exhaustion.
 
-In the default fresh mode on an interactive terminal, the provider CLI launches in its normal interactive form attached directly to that terminal — output, key input, window resizes, and Ctrl-C behave exactly as if you had run `claude`, `codex`, or `copilot` yourself. An ANSI-cleaned transcript is also written to the run directory (`attempt-N.out`). Without a terminal (pipes, cron, systemd resume), or with `--headless`, `LLM_SCHEDULER_HEADLESS=1`, or `LLM_SCHEDULER_NO_STREAM=1`, the non-interactive provider form runs on a captured PTY instead and its output streams to stdout (suppressed under `LLM_SCHEDULER_NO_STREAM=1`). In tmux mode the output appears in the tmux pane instead.
+In the default fresh mode on an interactive terminal, the provider CLI launches in its normal interactive form attached directly to that terminal — output, key input, window resizes, and Ctrl-C behave exactly as if you had run `claude`, `codex`, or `copilot` yourself. An ANSI-cleaned transcript is also written to the run directory (`attempt-N.out`).
+
+Without a terminal (pipes, cron, systemd resume), or with `--headless`, `LLM_SCHEDULER_HEADLESS=1`, or `LLM_SCHEDULER_NO_STREAM=1`, the non-interactive provider form runs on a captured PTY instead and its output streams to stdout (suppressed under `LLM_SCHEDULER_NO_STREAM=1`). In tmux mode the output appears in the tmux pane instead.
 
 ```bash
 llm-scheduler --tool codex --prompt-file task.md
@@ -132,9 +128,15 @@ Use `--command-template` if an installed CLI changes syntax or you use a wrapper
 
 ## ralph-robin
 
-`ralph-robin` is a small rotation wrapper around `llm-scheduler`. It checks the configured tools in order, keeps using the current tool while it is still usable, advances only when that tool is rate-limited, and delegates the actual prompt launch, retry, wake, and suspend behavior to `llm-scheduler`.
+`ralph-robin` is a small rotation wrapper around `llm-scheduler`. It checks the configured tools in order, keeps using the current tool while it is still usable, tries another usable or undetermined tool before sleeping, and delegates the actual prompt launch, retry, wake, and suspend behavior to `llm-scheduler`.
 
 `ralph-robin` defaults to autonomous headless launches even from an interactive terminal. The scheduler uses the provider's non-interactive adapter when available, streams output to your terminal, and aborts/re-evaluates rotation if a provider stops making progress or presents an input prompt.
+
+On an interactive terminal, Ralph status lines and common streamed provider patterns such as diffs, command/tool-call lines, warnings, and errors are highlighted with ANSI color; colors are disabled for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
+
+The default Ralph/scheduler palette uses green, blue, and teal ANSI colors chosen to remain readable on typical dark and light terminals. Override any role with `LLM_TOOLS_COLOR_<ROLE>` set to an ANSI SGR code, for example `LLM_TOOLS_COLOR_ERROR=1;34`. Supported roles are `BRAND`, `INFO`, `OK`, `WARN`, `ERROR`, `DIM`, `DIFF_ADD`, `DIFF_REMOVE`, `DIFF_HUNK`, `COMMAND`, `TOOL`, `STDERR`, and `HEADING`.
+
+The same roles also have compact UTF-8 symbols so block types remain distinguishable without relying only on color. Override a symbol with `LLM_TOOLS_SYMBOL_<ROLE>`, for example `LLM_TOOLS_SYMBOL_COMMAND=$`, or set `LLM_TOOLS_NO_SYMBOLS=1` to keep color only.
 
 ```bash
 ralph-robin --prompt-file task.md
@@ -158,7 +160,11 @@ Important options:
 - `--state-file FILE` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json` and stores the current provider index.
 - `--log-dir DIR` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.
 
-When every configured tool is known to be rate-limited, `ralph-robin` chooses the earliest real reset and invokes `llm-scheduler --suspend-until-ready` for that provider. If usage cannot be measured rather than being known exhausted, the scheduler's bounded unavailable wait behavior still applies.
+When every configured tool is known to be rate-limited, `ralph-robin` chooses the earliest real reset and invokes `llm-scheduler --suspend-until-ready` for that provider. If usage cannot be measured rather than being known exhausted, Ralph tries that provider path before suspending, and the scheduler's bounded unavailable wait behavior still applies.
+
+Before launching the selected provider, Ralph prepends a short runtime context to the prompt. It names the selected provider, lists the latest usage decisions, and tells the child to evaluate handoff/session-window instructions against the selected provider rather than a stale provider-specific scheduling command already present in the prompt.
+
+Provider processes launched by Ralph inherit `LLM_TOOLS_RALPH_ROBIN_ACTIVE=1`, `LLM_TOOLS_RALPH_ROBIN_SELECTED_TOOL`, and `LLM_TOOLS_RALPH_ROBIN_TOOLS`. If a child agent or script tries to run `llm-scheduler --suspend-until-ready` directly while that marker is present, the scheduler exits with status `75` instead of suspending. This keeps Ralph as the single rotation/suspend coordinator. `LLM_TOOLS_RALPH_ROBIN_ALLOW_SUSPEND=1` is reserved for explicit internal bypasses.
 
 If a selected provider exits with a scheduler autonomy abort, `ralph-robin` skips that provider for the current invocation, re-checks usage for the remaining tools, and launches the next usable provider. If every configured provider blocks this way, it exits with status `75` and leaves the logs under the printed run directory.
 
@@ -196,7 +202,7 @@ Provider-specific symlinks such as `latest-claude` and `latest-codex` point at t
 
 ## Requirements
 
-- Bash, `jq`, `curl`, GNU coreutils, `find`, `sort`, `tail`, `date`, `sha256sum`, `python3`.
+- Python 3.11 or newer.
 - Optional: `copilot` or `github-copilot` for Copilot usage capture.
 - Optional: `tmux` for scheduler tmux mode.
 - Optional: `systemd-run` or `rtcwake` for best-effort wake support.
@@ -230,10 +236,13 @@ llm-scheduler --wake-test
 Run:
 
 ```bash
-./llm-usage-tests.sh
+python -m pip install -e . pytest coverage
+coverage run -m pytest
+coverage combine
+coverage report --fail-under=80
 ```
 
-The tests use fixtures and mock commands; they do not require real Codex, Claude, Copilot, credentials, network access, or the user's real home directory.
+The tests use fixtures and mock commands; they do not require real Codex, Claude, Copilot, credentials, network access, or the user's real home directory. For manual end-to-end checks against installed providers, run the examples above without the test fixture environment.
 
 ## License
 

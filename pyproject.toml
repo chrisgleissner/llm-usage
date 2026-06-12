@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-tools"
+version = "0.1.0"
+description = "Local LLM CLI usage and scheduling tools"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+
+[project.scripts]
+llm-usage = "llm_tools.usage:main"
+llm-scheduler = "llm_tools.scheduler:main"
+ralph-robin = "llm_tools.ralph_robin:main"
+
+[tool.setuptools.packages.find]
+include = ["llm_tools*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["llm_tools"]
+branch = true
+parallel = true
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+exclude_lines = [
+  "if __name__ == .__main__.:",
+]
