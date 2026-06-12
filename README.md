@@ -187,11 +187,9 @@ llm-scheduler --tool claude --prompt-file task.md --command-template 'claude --p
 
 Use `ralph-robin` when the task matters more than which LLM provider runs it.
 
-It runs a [Ralph loop](https://venturebeat.com/technology/how-ralph-wiggum-went-from-the-simpsons-to-the-biggest-name-in-ai-right-now/): a persistent autonomous workflow that keeps going instead of stopping when one provider reaches a limit, stalls, or becomes temporarily unusable.
+It runs a [Ralph loop](https://venturebeat.com/technology/how-ralph-wiggum-went-from-the-simpsons-to-the-biggest-name-in-ai-right-now/): a persistent autonomous workflow that keeps going instead of stopping when one provider reaches a limit, stalls, or becomes temporarily unusable. This makes it useful for long-running autonomous coding, repair, hardening, documentation, and investigation loops where stopping at the first rate limit would waste time.
 
 `ralph-robin` wraps `llm-scheduler` and rotates across the configured providers. It can rotate only when the current provider is exhausted, or distribute work more evenly to burn down provider limits at a similar rate (default).
-
-This makes it useful for long-running autonomous coding, repair, hardening, documentation, and investigation loops where stopping at the first rate limit would waste time.
 
 When Ralph selects Claude Code through the built-in adapter, it uses Claude's `stream-json` print mode and renders that event stream as readable stdout so assistant text, tool calls, and tool results appear while the run is active.
 
