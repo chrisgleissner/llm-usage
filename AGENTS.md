@@ -130,6 +130,8 @@ Important knobs that tests or users may rely on:
 * `LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT` (headless question watchdog; abort when question-like output stops progressing for this many seconds; 0 disables)
 * `LLM_SCHEDULER_TMUX_TIMEOUT` (tmux completion timeout, seconds)
 * `LLM_SCHEDULER_WAKE_MIN_LEAD` (min seconds before a target to bother arming an OS wake timer)
+* `LLM_TOOLS_RALPH_ROBIN_ACTIVE` (internal/inherited guard: provider subprocesses launched by `ralph-robin` set this to prevent child `llm-scheduler --suspend-until-ready` calls from suspending outside Ralph's all-providers-exhausted decision)
+* `LLM_TOOLS_RALPH_ROBIN_ALLOW_SUSPEND` (internal/test bypass for the inherited Ralph suspend guard)
 
 Document any new user-facing or test-facing variable here and in `README.md` when appropriate.
 

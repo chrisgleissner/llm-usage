@@ -1019,6 +1019,7 @@ def run_pty_capture(
     status_path: Path | None = None,
     idle_timeout: int = 0,
     question_idle_timeout: int = 0,
+    env: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     safe_prompts = ("Confirm folder trust", "Do you trust the files in this folder?")
     blocking_patterns = (
@@ -1044,7 +1045,9 @@ def run_pty_capture(
             os.chdir(cwd)
         except OSError:
             pass
-        os.execvp(argv[0], list(argv))
+        if env is None:
+            os.execvp(argv[0], list(argv))
+        os.execvpe(argv[0], list(argv), env)
     try:
         if sys.stdout.isatty():
             winsize = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"\0" * 8)

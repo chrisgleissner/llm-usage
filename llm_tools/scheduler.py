@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -105,9 +106,10 @@ class SchedulerConfig:
     wake: bool = False
     wake_test: bool = False
     suspend_until_ready: bool = False
-    pre_suspend_confirmation_seconds: int = 5
+    pre_suspend_confirmation_seconds: int = field(default_factory=lambda: int(os.environ.get("LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS", "5") or "5"))
     wake_armed_target: int = 0
     exact_stdout: bool = False
+    ralph_robin_active: bool = False
 
 
 def parse_args(argv: list[str]) -> SchedulerConfig:
@@ -242,6 +244,13 @@ def validate_args(cfg: SchedulerConfig) -> None:
         if cfg.not_before_epoch is None:
             common.err(f"could not parse --at/--not-before time: {cfg.at_time}")
             raise SystemExit(2)
+    if (
+        cfg.suspend_until_ready
+        and os.environ.get("LLM_TOOLS_RALPH_ROBIN_ACTIVE") == "1"
+        and os.environ.get("LLM_TOOLS_RALPH_ROBIN_ALLOW_SUSPEND") != "1"
+    ):
+        common.err("--suspend-until-ready is disabled inside an active ralph-robin provider run; let ralph-robin rotate and suspend only after all configured providers are rate-limited")
+        raise SystemExit(common.AUTONOMY_ABORT_STATUS)
 
 
 def resolve_attach_mode(cfg: SchedulerConfig) -> None:
@@ -277,7 +286,63 @@ def safe_args_json(cfg: SchedulerConfig) -> dict[str, Any]:
         "dry_run": cfg.dry_run,
         "wake": cfg.wake,
         "suspend_until_ready": cfg.suspend_until_ready,
+        "ralph_robin_active": cfg.ralph_robin_active,
     }
+
+
+def provider_env(cfg: SchedulerConfig) -> dict[str, str] | None:
+    if not cfg.ralph_robin_active:
+        return None
+    env = os.environ.copy()
+    env["LLM_TOOLS_RALPH_ROBIN_ACTIVE"] = "1"
+    env.setdefault("LLM_TOOLS_RALPH_ROBIN_SCHEDULER", "guarded")
+    return env
+
+
+def stream_color_enabled(stream: Any) -> bool:
+    return bool(
+        getattr(stream, "isatty", lambda: False)()
+        and os.environ.get("TERM") != "dumb"
+        and not os.environ.get("NO_COLOR")
+        and not os.environ.get("LLM_USAGE_NO_COLOR")
+    )
+
+
+def ansi_wrap(text: str, code: str) -> str:
+    return f"\033[{code}m{text}\033[0m"
+
+
+def highlight_provider_text(raw: bytes, *, stream_name: str, enabled: bool) -> bytes:
+    if not enabled:
+        return raw
+    text = raw.decode("utf-8", "replace")
+    out: list[str] = []
+    for line in text.splitlines(True):
+        bare = line.rstrip("\r\n")
+        ending = line[len(bare):]
+        stripped = bare.lstrip()
+        code = ""
+        if "\033[" in bare:
+            out.append(line)
+            continue
+        if stream_name == "stderr":
+            code = "33"
+        if re.match(r"^(diff --git|@@\s)", stripped):
+            code = "36;1"
+        elif stripped.startswith("+") and not stripped.startswith("+++"):
+            code = "32"
+        elif stripped.startswith("-") and not stripped.startswith("---"):
+            code = "31"
+        elif re.search(r"\b(tool call|function call|exec_command|apply_patch|running command|command:)\b", stripped, re.I):
+            code = "36;1"
+        elif re.match(r"^(\$|>|python\b|pytest\b|git\b|gh\b|./|llm-|codex\b|claude\b|copilot\b|bash\b|make\b|npm\b|pnpm\b)", stripped):
+            code = "36"
+        elif re.search(r"\b(error|failed|failure|rate[- ]limit|autonomous abort|blocked)\b", stripped, re.I):
+            code = "31;1"
+        elif re.match(r"^[A-Z][A-Za-z0-9 _/-]{2,40}:$", stripped):
+            code = "1"
+        out.append(ansi_wrap(bare, code) + ending if code else line)
+    return "".join(out).encode("utf-8", "replace")
 
 
 def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
@@ -530,7 +595,7 @@ def wait_until_usable(cfg: SchedulerConfig, logs: common.RunLogs) -> None:
 
 def run_fresh_attached(cfg: SchedulerConfig, argv: list[str], output_file: Path, status_file: Path) -> int:
     command_line = common.argv_to_command_line(argv)
-    proc = subprocess.run(["script", "--return", "--quiet", "--flush", "--command", command_line, str(output_file)], cwd=cfg.cwd, check=False)
+    proc = subprocess.run(["script", "--return", "--quiet", "--flush", "--command", command_line, str(output_file)], cwd=cfg.cwd, env=provider_env(cfg), check=False)
     status_file.write_text(str(proc.returncode), encoding="utf-8")
     common.clean_capture_file(output_file)
     return proc.returncode
@@ -549,6 +614,7 @@ def run_fresh_headless(cfg: SchedulerConfig, argv: list[str], output_file: Path,
         status_path=status_file,
         idle_timeout=int(os.environ.get("LLM_SCHEDULER_IDLE_TIMEOUT", "600") or "600"),
         question_idle_timeout=int(os.environ.get("LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT", "30") or "30"),
+        env=provider_env(cfg),
     )
     return status
 
@@ -558,11 +624,13 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     import select
     import signal
 
-    proc = subprocess.Popen(argv, cwd=cfg.cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(argv, cwd=cfg.cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=provider_env(cfg))
     assert proc.stdout is not None and proc.stderr is not None
     stdout_fd = proc.stdout.fileno()
     stderr_fd = proc.stderr.fileno()
     open_fds = {stdout_fd: "stdout", stderr_fd: "stderr"}
+    stdout_color = stream_color_enabled(sys.stdout)
+    stderr_color = stream_color_enabled(sys.stderr)
     stdout_parts: list[bytes] = []
     combined_parts: list[bytes] = []
     start = time.time()
@@ -589,13 +657,13 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
             if open_fds.get(fd) == "stdout":
                 stdout_parts.append(chunk)
                 try:
-                    sys.stdout.buffer.write(chunk)
+                    sys.stdout.buffer.write(highlight_provider_text(chunk, stream_name="stdout", enabled=stdout_color))
                     sys.stdout.buffer.flush()
                 except OSError:
                     pass
             else:
                 try:
-                    sys.stderr.buffer.write(chunk)
+                    sys.stderr.buffer.write(highlight_provider_text(chunk, stream_name="stderr", enabled=stderr_color))
                     sys.stderr.buffer.flush()
                 except OSError:
                     pass
@@ -643,11 +711,13 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
     target = f"{session}:{window}"
     command_line = common.argv_to_command_line(argv)
     cmd_file = logs.run_dir / "tmux-command.sh"
+    guard_exports = "export LLM_TOOLS_RALPH_ROBIN_ACTIVE=1\nexport LLM_TOOLS_RALPH_ROBIN_SCHEDULER=guarded\n" if cfg.ralph_robin_active else ""
     cmd_file.write_text(
         "#!/usr/bin/env bash\n"
         f"# tmux target: {target}\n"
         "set -euo pipefail\n"
         f"cd {shlex.quote(cfg.cwd)}\n"
+        f"{guard_exports}"
         "set +e\n"
         f"{command_line}\n"
         "status=$?\n"

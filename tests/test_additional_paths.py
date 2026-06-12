@@ -67,6 +67,12 @@ def test_scheduler_argument_branches(env: dict[str, str], tmp_path: Path) -> Non
     wake = run_cmd(["./llm-scheduler", "--wake-test"], env)
     assert wake.returncode == 0
     assert json.loads(wake.stdout)["note"].startswith("wake is best effort")
+    guarded = run_cmd(
+        ["./llm-scheduler", "--tool", "claude", "--prompt", "x", "--suspend-until-ready"],
+        env | {"LLM_TOOLS_RALPH_ROBIN_ACTIVE": "1"},
+    )
+    assert guarded.returncode == common.AUTONOMY_ABORT_STATUS
+    assert "disabled inside an active ralph-robin" in guarded.stderr
 
 
 def test_scheduler_unavailable_suspend_and_no_stream(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:
@@ -374,7 +380,19 @@ def test_validation_and_selection_edge_branches(tmp_path: Path, monkeypatch: pyt
     sel = ralph_robin.select_tool(cfg, logs, 0, {"claude", "codex"})
     assert sel["rotation_reason"] == "all-skipped"
     sel2 = ralph_robin.select_tool(cfg, logs, 0, set())
-    assert sel2["rotation_reason"] == "all-unusable"
+    assert sel2["rotation_reason"] == "advanced-to-undetermined"
+    assert sel2["all_rate_limited"] is False
+
+    snapshots = {
+        "claude": {"available": True, "five_hour": {"remaining": 0, "resets_at": 2000}, "week": {"remaining": 50}},
+        "codex": {"available": True},
+    }
+    monkeypatch.setattr(common, "usage_snapshot_for_tool", lambda tool: snapshots[tool])
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    sel3 = ralph_robin.select_tool(cfg, logs, 0, set())
+    assert sel3["tool"] == "codex"
+    assert sel3["rotation_reason"] == "advanced-to-undetermined"
+    assert sel3["all_rate_limited"] is False
 
 
 def test_scheduler_more_system_edges(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

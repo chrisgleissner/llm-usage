@@ -126,9 +126,11 @@ Use `--command-template` if an installed CLI changes syntax or you use a wrapper
 
 ## ralph-robin
 
-`ralph-robin` is a small rotation wrapper around `llm-scheduler`. It checks the configured tools in order, keeps using the current tool while it is still usable, advances only when that tool is rate-limited, and delegates the actual prompt launch, retry, wake, and suspend behavior to `llm-scheduler`.
+`ralph-robin` is a small rotation wrapper around `llm-scheduler`. It checks the configured tools in order, keeps using the current tool while it is still usable, tries another usable or undetermined tool before sleeping, and delegates the actual prompt launch, retry, wake, and suspend behavior to `llm-scheduler`.
 
 `ralph-robin` defaults to autonomous headless launches even from an interactive terminal. The scheduler uses the provider's non-interactive adapter when available, streams output to your terminal, and aborts/re-evaluates rotation if a provider stops making progress or presents an input prompt.
+
+On an interactive terminal, Ralph status lines and common streamed provider patterns such as diffs, command/tool-call lines, warnings, and errors are highlighted with ANSI color; colors are disabled for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
 
 ```bash
 ralph-robin --prompt-file task.md
@@ -152,7 +154,9 @@ Important options:
 - `--state-file FILE` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json` and stores the current provider index.
 - `--log-dir DIR` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.
 
-When every configured tool is known to be rate-limited, `ralph-robin` chooses the earliest real reset and invokes `llm-scheduler --suspend-until-ready` for that provider. If usage cannot be measured rather than being known exhausted, the scheduler's bounded unavailable wait behavior still applies.
+When every configured tool is known to be rate-limited, `ralph-robin` chooses the earliest real reset and invokes `llm-scheduler --suspend-until-ready` for that provider. If usage cannot be measured rather than being known exhausted, Ralph tries that provider path before suspending, and the scheduler's bounded unavailable wait behavior still applies.
+
+Provider processes launched by Ralph inherit `LLM_TOOLS_RALPH_ROBIN_ACTIVE=1`. If a child agent or script tries to run `llm-scheduler --suspend-until-ready` directly while that marker is present, the scheduler exits with status `75` instead of suspending. This keeps Ralph as the single rotation/suspend coordinator. `LLM_TOOLS_RALPH_ROBIN_ALLOW_SUSPEND=1` is reserved for explicit internal bypasses.
 
 If a selected provider exits with a scheduler autonomy abort, `ralph-robin` skips that provider for the current invocation, re-checks usage for the remaining tools, and launches the next usable provider. If every configured provider blocks this way, it exits with status `75` and leaves the logs under the printed run directory.
 

@@ -95,6 +95,63 @@ def trim(value: str) -> str:
     return value.strip()
 
 
+def color_enabled() -> bool:
+    return bool(
+        sys.stderr.isatty()
+        and os.environ.get("TERM") != "dumb"
+        and not os.environ.get("NO_COLOR")
+        and not os.environ.get("LLM_USAGE_NO_COLOR")
+    )
+
+
+def style(text: str, code: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if color_enabled() else text
+
+
+def status_line(message: str, *, level: str = "info") -> None:
+    colors = {"info": "36", "ok": "32", "warn": "33", "error": "31;1", "dim": "2"}
+    prefix = style("ralph-robin", "1")
+    print(f"{prefix}: {style(message, colors.get(level, '36'))}", file=sys.stderr)
+
+
+def decision_summary(decision: dict[str, Any]) -> str:
+    reason = str(decision.get("reason", "unknown"))
+    windows = decision.get("windows")
+    parts: list[str] = []
+    if isinstance(windows, list):
+        for window in windows:
+            if not isinstance(window, dict):
+                continue
+            remaining = window.get("remaining")
+            name = window.get("name", "?")
+            if isinstance(remaining, (int, float)):
+                parts.append(f"{name} {common.fmt_pct(remaining)}% left")
+    wait_until = decision.get("wait_until")
+    if reason == "rate-limited" and isinstance(wait_until, int):
+        parts.append(f"until {common.format_local_epoch(wait_until)}")
+    detail = ", ".join(parts) if parts else "-"
+    return f"{reason} ({detail})"
+
+
+def print_usage_summary(selection: dict[str, Any]) -> None:
+    decisions = selection.get("decisions")
+    if not isinstance(decisions, list):
+        return
+    rendered: list[str] = []
+    for item in decisions:
+        if not isinstance(item, dict):
+            continue
+        tool = str(item.get("tool", "?"))
+        summary = decision_summary(item)
+        if item.get("usable") is True:
+            rendered.append(style(f"{tool}: {summary}", "32"))
+        elif item.get("reason") == "rate-limited":
+            rendered.append(style(f"{tool}: {summary}", "31"))
+        else:
+            rendered.append(style(f"{tool}: {summary}", "33"))
+    status_line("usage " + " | ".join(rendered), level="dim")
+
+
 def parse_tools(raw: str) -> list[str]:
     tools: list[str] = []
     for part in raw.split(","):
@@ -279,16 +336,34 @@ def select_tool(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skip
         common.log_event(logs, "usage_snapshot", {"tool": tool, "snapshot": snapshot})
         common.log_event(logs, "usage_decision", decision)
     if decisions[current_index].get("usable") is True and cfg.tools[current_index] not in skipped:
-        return {"index": current_index, "tool": cfg.tools[current_index], "rotation_reason": "current-usable", "all_rate_limited": False, "decision": decisions[current_index]}
+        return {"index": current_index, "tool": cfg.tools[current_index], "rotation_reason": "current-usable", "all_rate_limited": False, "decision": decisions[current_index], "decisions": decisions}
     for i in range(1, len(cfg.tools)):
         nxt = (current_index + i) % len(cfg.tools)
         if decisions[nxt].get("usable") is True and cfg.tools[nxt] not in skipped:
-            return {"index": nxt, "tool": cfg.tools[nxt], "rotation_reason": "advanced-to-usable", "all_rate_limited": False, "decision": decisions[nxt]}
+            return {"index": nxt, "tool": cfg.tools[nxt], "rotation_reason": "advanced-to-usable", "all_rate_limited": False, "decision": decisions[nxt], "decisions": decisions}
+
+    for i in range(len(cfg.tools)):
+        fallback = (current_index + i) % len(cfg.tools)
+        if cfg.tools[fallback] in skipped:
+            continue
+        if decisions[fallback].get("reason") != "rate-limited":
+            return {
+                "index": fallback,
+                "tool": cfg.tools[fallback],
+                "rotation_reason": "advanced-to-undetermined",
+                "all_rate_limited": False,
+                "decision": decisions[fallback],
+                "decisions": decisions,
+            }
+
+    active_decisions = [(i, decision) for i, decision in enumerate(decisions) if cfg.tools[i] not in skipped]
+    all_active_rate_limited = bool(active_decisions) and all(
+        decision.get("reason") == "rate-limited" and isinstance(decision.get("wait_until"), int)
+        for _i, decision in active_decisions
+    )
     best_index = -1
     best_wait: int | None = None
-    for i, decision in enumerate(decisions):
-        if cfg.tools[i] in skipped:
-            continue
+    for i, decision in active_decisions:
         wait_until = decision.get("wait_until")
         if decision.get("reason") == "rate-limited" and isinstance(wait_until, int):
             if best_wait is None or wait_until < best_wait:
@@ -301,13 +376,14 @@ def select_tool(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skip
                 best_index = fallback
                 break
     if best_index == -1:
-        return {"index": -1, "tool": "", "rotation_reason": "all-skipped", "all_rate_limited": False, "decision": {"usable": False, "reason": "all-skipped"}}
+        return {"index": -1, "tool": "", "rotation_reason": "all-skipped", "all_rate_limited": False, "decision": {"usable": False, "reason": "all-skipped"}, "decisions": decisions}
     return {
         "index": best_index,
         "tool": cfg.tools[best_index],
         "rotation_reason": "all-unusable",
-        "all_rate_limited": best_wait is not None,
+        "all_rate_limited": all_active_rate_limited and best_wait is not None,
         "decision": decisions[best_index],
+        "decisions": decisions,
     }
 
 
@@ -333,6 +409,7 @@ def scheduler_config_for(cfg: RalphConfig, selected_tool: str, logs: common.RunL
         wake=cfg.wake,
         suspend_until_ready=cfg.suspend_until_ready or force_suspend,
         exact_stdout=True,
+        ralph_robin_active=True,
     )
 
 
@@ -393,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
     common.log_event(logs, "start", safe_args_json(cfg))
     common.log_event(logs, "prompt", {"source": cfg.prompt_source, "sha256": prompt_sha, "prompt": prompt})
     current_index = current_index_from_state(cfg)
-    print(f"ralph-robin: logs: {logs.run_dir}", file=sys.stderr)
+    status_line(f"logs: {logs.run_dir}", level="dim")
     skipped: set[str] = set()
     while True:
         common.log_event(logs, "state", {"state_file": str(cfg.state_file), "current_index": current_index})
@@ -403,16 +480,18 @@ def main(argv: list[str] | None = None) -> int:
         selected_tool = str(selection.get("tool", ""))
         if selected_index == -1 or not selected_tool:
             common.log_event(logs, "final", {"status": "autonomy-abort", "reason": "all-providers-skipped", "skipped": sorted(skipped)})
-            print(f"autonomy-abort: all configured tools blocked; logs: {logs.run_dir}", file=sys.stderr)
+            status_line(f"autonomy-abort: all configured tools blocked; logs: {logs.run_dir}", level="error")
             return common.AUTONOMY_ABORT_STATUS
         reason = str(selection.get("rotation_reason"))
         all_rate_limited = bool(selection.get("all_rate_limited"))
         common.log_text(logs, f"selected provider={selected_tool} reason={reason} all_rate_limited={str(all_rate_limited).lower()}")
-        print(f"ralph-robin: selected {selected_tool} ({reason})", file=sys.stderr)
+        print_usage_summary(selection)
+        level = "warn" if all_rate_limited else "ok"
+        status_line(f"selected {selected_tool} ({reason})", level=level)
         if all_rate_limited:
             wait_until = selection.get("decision", {}).get("wait_until")
             wait_display = f"{common.format_local_epoch(int(wait_until))} (epoch {wait_until})" if isinstance(wait_until, int) else "unknown"
-            print(f"ralph-robin: all configured tools are rate-limited; suspending via llm-scheduler until {wait_display}", file=sys.stderr)
+            status_line(f"all configured tools are rate-limited; suspending via llm-scheduler until {wait_display}", level="warn")
         save_state(cfg, selected_index, selected_tool)
         if cfg.dry_run:
             common.log_event(logs, "final", {"status": "dry-run"})
@@ -428,11 +507,11 @@ def main(argv: list[str] | None = None) -> int:
         if status == common.AUTONOMY_ABORT_STATUS:
             common.log_text(logs, f"scheduler autonomy-abort for provider={selected_tool}; re-evaluating rotation")
             common.log_event(logs, "provider_autonomy_abort", {"tool": selected_tool, "index": selected_index})
-            print(f"ralph-robin: {selected_tool} blocked autonomously; re-evaluating rotation", file=sys.stderr)
+            status_line(f"{selected_tool} blocked autonomously; re-evaluating rotation", level="warn")
             skipped.add(selected_tool)
             if len(skipped) >= len(cfg.tools):
                 common.log_event(logs, "final", {"status": "autonomy-abort", "reason": "all-providers-skipped", "skipped": sorted(skipped)})
-                print(f"autonomy-abort: all configured tools blocked; logs: {logs.run_dir}", file=sys.stderr)
+                status_line(f"autonomy-abort: all configured tools blocked; logs: {logs.run_dir}", level="error")
                 return common.AUTONOMY_ABORT_STATUS
             current_index = (selected_index + 1) % len(cfg.tools)
             continue
