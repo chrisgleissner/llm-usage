@@ -37,18 +37,21 @@ def test_usage_help_and_validation(env: dict[str, str]) -> None:
 
 def test_usage_json_table_statusline_and_cache(env: dict[str, str]) -> None:
     seed_provider_data(env)
-    env["LLM_USAGE_COPILOT_CAPTURE_TEXT"] = "Monthly: 5% used · AI Credits: 0"
+    env["LLM_USAGE_COPILOT_CAPTURE_TEXT"] = "Plan: 62% used · Session: 0 AIC used"
     js = run_cmd(["./llm-usage", "--json", "--show-copilot-credits"], env)
     assert js.returncode == 0, js.stderr
     data = json.loads(js.stdout)
     assert set(data) == {"generated_at", "codex", "claude", "copilot"}
     assert data["codex"]["rows"][1]["key"] == "codex-spark"
-    assert data["copilot"]["monthly"]["remaining"] == 95
-    assert data["copilot"]["ai_credits"]["used"] == 0
+    assert data["copilot"]["monthly"]["used"] == 62
+    assert data["copilot"]["monthly"]["remaining"] == 38
+    assert data["copilot"].get("ai_credits") is None
     table = run_cmd(["./llm-usage", "--show-source"], env)
     assert table.returncode == 0
     assert "Codex" in table.stdout
     assert "GPT-5.3 Spark" in table.stdout
+    assert "Copilot" in table.stdout
+    assert "38%" in table.stdout
     assert "copilot cli" in table.stdout
     hidden = run_cmd(["./llm-usage", "--hide-codex-spark"], env)
     assert "GPT-5.3 Spark" not in hidden.stdout
@@ -64,6 +67,18 @@ def test_usage_json_table_statusline_and_cache(env: dict[str, str]) -> None:
     )
     assert status.stdout.strip() == "Claude 5h 90% left weekly 75% left"
     assert (Path(env["HOME"]) / ".cache" / "llm-tools" / "llm-usage" / "claude-status.json").is_file()
+
+
+def test_usage_log_only(env: dict[str, str]) -> None:
+    seed_provider_data(env)
+    env["LLM_USAGE_DISABLE_COPILOT"] = "1"
+    result = run_cmd(["./llm-usage", "--log-only"], env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    log = Path(env["HOME"]) / ".cache" / "llm-tools" / "llm-usage" / "llm-usage.log"
+    entries = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert {(e["provider"], e["window"]) for e in entries} >= {("Codex", "5h"), ("Codex", "weekly"), ("Claude", "5h"), ("Claude", "weekly")}
+    assert all(e["remaining"] is not None for e in entries)
 
 
 def test_scheduler_validation_and_dry_run(env: dict[str, str]) -> None:

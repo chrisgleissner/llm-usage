@@ -16,7 +16,7 @@ TOOL_COL_WIDTH = 14
 TABLE_GAP_WIDTH = 3
 
 
-USAGE = """Usage: llm-usage [--json] [--watch SECONDS] [--show-copilot-credits] [--statusline] [--no-header]
+USAGE = """Usage: llm-usage [--json] [--watch SECONDS] [--show-copilot-credits] [--statusline] [--no-header] [--log-only]
 
 Shows remaining percentage for:
   - Codex current session / 5-hour window
@@ -40,6 +40,7 @@ Options:
   --hide-codex-spark    Hide Codex Spark rows.
   --copilot-monthly-reset-offset-days DAYS  Day offset from month start for Copilot monthly reset (default: 0).
   --statusline        Read Claude Code statusline JSON from stdin, cache it, print compact line.
+  --log-only          Sample providers and append to the usage log without printing a table.
   --no-header         Omit table header.
   -h, --help          Show this help.
 """
@@ -51,6 +52,7 @@ class Config:
         self.watch_interval = "0"
         self.json_output = False
         self.statusline_mode = False
+        self.log_only = False
         self.no_header = False
         self.show_copilot_credits = False
         self.show_source = env.get("LLM_USAGE_SHOW_SOURCE", "0") == "1"
@@ -102,6 +104,9 @@ def parse_args(argv: list[str]) -> Config:
             i += 2
         elif arg == "--statusline":
             cfg.statusline_mode = True
+            i += 1
+        elif arg == "--log-only":
+            cfg.log_only = True
             i += 1
         elif arg == "--no-header":
             cfg.no_header = True
@@ -316,12 +321,30 @@ def statusline_mode() -> None:
     print(out)
 
 
+def log_once(cfg: Config) -> None:
+    from io import StringIO
+    import contextlib
+
+    with contextlib.redirect_stdout(StringIO()):
+        render_once(cfg)
+    common.prune_usage_log()
+
+
 def main(argv: list[str] | None = None) -> int:
     common.migrate_legacy_cache_dirs()
     cfg = parse_args(list(sys.argv[1:] if argv is None else argv))
     common.usage_cache_dir().mkdir(parents=True, exist_ok=True)
     if cfg.statusline_mode:
         statusline_mode()
+        return 0
+    if cfg.log_only:
+        cfg.json_output = False
+        cfg.show_remaining_time = False
+        if cfg.watch_interval != "0":
+            while True:
+                log_once(cfg)
+                time.sleep(float(cfg.watch_interval))
+        log_once(cfg)
         return 0
     if cfg.watch_interval != "0":
         while True:

@@ -13,6 +13,7 @@ import shlex
 import shutil
 import signal
 import stat
+import struct
 import subprocess
 import sys
 import termios
@@ -25,6 +26,7 @@ from urllib.request import Request, urlopen
 
 
 AUTONOMY_ABORT_STATUS = 75
+TRANSIENT_COPILOT_CACHE_REASONS = {"capture-error", "format-changed", "refresh-pending", "timeout"}
 
 
 def err(message: str) -> None:
@@ -550,7 +552,7 @@ def find_copilot_cli() -> str | None:
 
 def strip_ansi(text: str) -> str:
     text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", text)
-    text = re.sub(r"\x1b\[[0-9;?<>=]*[ -/]*[@-~]", "", text)
+    text = re.sub(r"\x1b\[[0-9;?<>=-]*[ -/]*[@-~]", "", text)
     text = re.sub(r"\x1b[()][\x20-\x7e]", "", text)
     text = re.sub(r"\x1b[@-Z\\^_<>=78]", "", text)
     return text.replace("\r\n", "\n").replace("\r", "\n").replace("\a", "").replace("\x0e", "").replace("\x0f", "")
@@ -593,7 +595,7 @@ def capture_copilot_screen(env: dict[str, str] | None = None) -> tuple[str, str]
 
 
 def parse_copilot_monthly_used(text: str) -> float | None:
-    m = re.search(r"Monthly:\s*([0-9]+(?:[.][0-9]+)?)%\s*used", text)
+    m = re.search(r"(?:Monthly|Plan):\s*([0-9]+(?:[.][0-9]+)?)%\s*used", text)
     return float(m.group(1)) if m else None
 
 
@@ -631,6 +633,29 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
     env = env or os.environ
     cache = usage_cache_dir(env) / "copilot-usage.json"
     lock = usage_cache_dir(env) / "copilot-refresh.lock"
+    ignored_transient_mtime: int | None = None
+
+    def cached_result(allow_ignored_transient: bool = False) -> dict[str, Any] | None:
+        nonlocal ignored_transient_mtime
+        if not cache.is_file() or cache.stat().st_size <= 0:
+            return None
+        mtime = int(cache.stat().st_mtime)
+        try:
+            data = json.loads(cache.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if (
+            isinstance(data, dict)
+            and data.get("available") is False
+            and data.get("reason") in TRANSIENT_COPILOT_CACHE_REASONS
+            and not allow_ignored_transient
+        ):
+            ignored_transient_mtime = mtime
+            return None
+        if ignored_transient_mtime is not None and mtime <= ignored_transient_mtime and not allow_ignored_transient:
+            return None
+        return data if isinstance(data, dict) else None
+
     bypass = (
         "LLM_USAGE_COPILOT_CAPTURE_TEXT" in env
         or bool(env.get("LLM_USAGE_COPILOT_CAPTURE_CMD"))
@@ -641,10 +666,9 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
         return read_copilot_live(env)
     ttl = int(env.get("LLM_USAGE_COPILOT_CACHE_TTL", "300") or "300")
     if cache.is_file() and cache.stat().st_size > 0 and int(time.time()) - int(cache.stat().st_mtime) <= ttl:
-        try:
-            return json.loads(cache.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            pass
+        cached = cached_result()
+        if cached is not None:
+            return cached
     refresh_started = False
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
@@ -675,18 +699,28 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
     deadline = time.time() + max(0.0, wait_budget)
     while time.time() < deadline:
         if cache.is_file() and cache.stat().st_size > 0 and int(time.time()) - int(cache.stat().st_mtime) <= ttl:
-            try:
-                return json.loads(cache.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            cached = cached_result()
+            if cached is not None:
+                return cached
+            if ignored_transient_mtime is None:
                 break
         if not lock.exists():
             break
         time.sleep(0.05)
     if cache.is_file() and cache.stat().st_size > 0:
+        cached = cached_result()
+        if cached is not None:
+            return cached
+    if ignored_transient_mtime is not None and wait_budget > 0:
+        live = read_copilot_live(env)
         try:
-            return json.loads(cache.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(live, separators=(",", ":")) + "\n", encoding="utf-8")
+            tmp.replace(cache)
+        except OSError:
             pass
+        return live
     return {"provider": "copilot", "source": "copilot cli", "available": False, "reason": "refresh-pending"}
 
 
@@ -746,29 +780,60 @@ def log_usage_sample(provider: str, window: str, remaining: Any, env: dict[str, 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
             fh.write(json.dumps({"ts": now_epoch(env), "provider": provider, "window": window, "remaining": num(remaining)}, separators=(",", ":")) + "\n")
     except OSError:
+        pass
+
+
+def usage_log_tail_lines(env: dict[str, str]) -> int:
+    try:
+        return int(env.get("LLM_USAGE_LOG_TAIL_LINES", "50000") or "50000")
+    except ValueError:
+        return 50000
+
+
+def prune_usage_log(env: dict[str, str] | None = None) -> None:
+    env = env or os.environ
+    path = usage_cache_dir(env) / "llm-usage.log"
+    try:
+        max_bytes = int(env.get("LLM_USAGE_LOG_MAX_BYTES", "10485760") or "10485760")
+    except ValueError:
+        max_bytes = 10485760
+    if max_bytes <= 0:
+        return
+    try:
+        if not path.is_file() or path.stat().st_size <= max_bytes:
+            return
+        with path.open("r+", encoding="utf-8") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            lines = fh.read().splitlines()[-usage_log_tail_lines(env):]
+            fh.seek(0)
+            fh.truncate()
+            fh.write("\n".join(lines) + ("\n" if lines else ""))
+    except (OSError, UnicodeDecodeError):
         pass
 
 
 def estimate_remaining_time_from_log(provider: str, window: str, remaining: Any, env: dict[str, str] | None = None) -> str:
     env = env or os.environ
     rem = num(remaining)
-    if rem is None:
+    if rem is None or rem <= 0:
         return "-"
     path = usage_cache_dir(env) / "llm-usage.log"
     if not path.is_file() or path.stat().st_size == 0:
         return "-"
     try:
-        tail_lines = int(env.get("LLM_USAGE_LOG_TAIL_LINES", "20000") or "20000")
-        max_stale = int(env.get("LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS", "120") or "120")
-        stale_mult = int(env.get("LLM_USAGE_REMAINING_TIME_STALE_MULTIPLIER", "3") or "3")
+        max_stale = int(env.get("LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS", "600") or "600")
+        lookback = int(env.get("LLM_USAGE_REMAINING_TIME_LOOKBACK_SECONDS", "259200") or "259200")
+        max_gap = int(env.get("LLM_USAGE_REMAINING_TIME_MAX_GAP_SECONDS", "3600") or "3600")
     except ValueError:
-        tail_lines, max_stale, stale_mult = 20000, 120, 3
-    cutoff = now_epoch(env) - 604800
+        max_stale, lookback, max_gap = 600, 259200, 3600
+    now = now_epoch(env)
+    cutoff = now - lookback
     samples: list[tuple[int, float]] = []
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-tail_lines:]
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-usage_log_tail_lines(env):]
     except OSError:
         return "-"
     for line in lines:
@@ -780,47 +845,26 @@ def estimate_remaining_time_from_log(provider: str, window: str, remaining: Any,
         if ts is None or value is None or ts < cutoff:
             continue
         samples.append((int(ts), value))
+    if not samples:
+        return "-"
+    if max_stale > 0 and now - samples[-1][0] > max_stale:
+        return "-"
     prev_ts: int | None = None
     prev_rem = 0.0
-    trend_start: int | None = None
-    first_decrease: int | None = None
-    last_decrease: int | None = None
     total_reduction = 0.0
     total_seconds = 0
     for ts, value in samples:
         if prev_ts is not None:
             dt = ts - prev_ts
-            if dt > 0:
-                if trend_start is None:
-                    trend_start = prev_ts
-                if value < prev_rem:
-                    total_reduction += prev_rem - value
-                    total_seconds += dt
-                    if first_decrease is None:
-                        first_decrease = trend_start
-                    last_decrease = ts
-                elif value > prev_rem:
-                    trend_start = ts
-                    first_decrease = None
-                    last_decrease = None
-                    total_reduction = 0.0
-                    total_seconds = 0
-                else:
-                    total_seconds += dt
+            # Increases are window resets and gaps longer than max_gap may hide a
+            # reset; skip those intervals but keep the burn accumulated so far.
+            if dt > 0 and (max_gap <= 0 or dt <= max_gap) and value <= prev_rem:
+                total_reduction += prev_rem - value
+                total_seconds += dt
         prev_ts = ts
         prev_rem = value
-    if total_seconds <= 0 or total_reduction <= 0 or rem <= 0:
+    if total_seconds <= 0 or total_reduction <= 0:
         return "-"
-    if first_decrease is not None and last_decrease is not None:
-        stale_seconds = now_epoch(env) - last_decrease
-        if max_stale > 0 and stale_seconds > max_stale:
-            return "-"
-        decay_window = last_decrease - first_decrease
-        stale_threshold = decay_window * stale_mult
-        if max_stale > 0 and stale_threshold > max_stale:
-            stale_threshold = max_stale
-        if decay_window > 0 and stale_seconds > stale_threshold:
-            return "-"
     remaining_seconds = int(rem * total_seconds / total_reduction)
     if remaining_seconds <= 0:
         return "-"
@@ -1119,7 +1163,9 @@ def run_pty_capture(
     try:
         if sys.stdout.isatty():
             winsize = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
-            fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+        else:
+            winsize = struct.pack("HHHH", 30, 240, 0, 0)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
     except OSError:
         pass
 

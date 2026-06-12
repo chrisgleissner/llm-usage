@@ -65,6 +65,19 @@ llm-usage --show-source
 llm-usage --statusline
 ```
 
+By default, it shows all supported providers:
+
+```bash
+Last refreshed: 2026-06-12 15:59:17
+Tool             Window         Remaining     Remaining Time   Resets             Time to Reset
+--------------   ------------   -----------   --------------   ----------------   ------------
+Codex            5h             21%           -                2026-06-12 16:25   26m         
+Codex            weekly         51%           -                2026-06-18 15:00   5d 23h 1m   
+Claude           5h             6%            2m               2026-06-12 16:30   30m         
+Claude           weekly         82%           7h 46m           2026-06-18 13:00   5d 21h      
+Copilot          monthly        38%           -                2026-07-01 00:00   18d 8h 
+```
+
 Options:
 
 | Option                   | Purpose                                                                  |
@@ -156,7 +169,7 @@ Use `ralph-robin` when the task matters more than which LLM provider runs it.
 
 It runs a [Ralph loop](https://venturebeat.com/technology/how-ralph-wiggum-went-from-the-simpsons-to-the-biggest-name-in-ai-right-now/): a persistent autonomous workflow that keeps going instead of stopping when one provider reaches a limit, stalls, or becomes temporarily unusable.
 
-`ralph-robin` wraps `llm-scheduler` and rotates across the configured providers. It can rotate only when the current provider is exhausted, or distribute work more evenly to burn down provider limits at a similar rate.
+`ralph-robin` wraps `llm-scheduler` and rotates across the configured providers. It can rotate only when the current provider is exhausted, or distribute work more evenly to burn down provider limits at a similar rate (default).
 
 This makes it useful for long-running autonomous coding, repair, hardening, documentation, and investigation loops where stopping at the first rate limit would waste time.
 
@@ -166,6 +179,15 @@ ralph-robin --prompt "Continue until tests pass"
 ralph-robin --tools claude,codex,copilot --prompt-file task.md
 ralph-robin --prompt-file task.md --tmux llm-work
 ralph-robin --prompt-file task.md --dry-run
+```
+
+At start-up, the chosen provider is printed:
+
+```bash
+ralph-robin --prompt-file ralph.md
+◆ ralph-robin: · logs: /home/chris/.cache/llm-tools/ralph-robin/logs/20260612-155359-ralph-robin-vp0wu5qd
+◆ ralph-robin: · usage claude: usable (5h 32% left, weekly 84% left) | codex: usable (5h 21% left, weekly 51% left)
+◆ ralph-robin: ✓ selected claude (even-burn)
 ```
 
 Options:

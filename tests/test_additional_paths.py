@@ -260,6 +260,7 @@ def test_common_extra_branches(env: dict[str, str], fake_bin: Path, tmp_path: Pa
     assert common.time_until("bad") == "-"
     assert common.parse_copilot_ai_credits("AI Credits: 17") == 17
     assert common.parse_copilot_monthly_used("Monthly: 42% used") == 42
+    assert common.parse_copilot_monthly_used("Plan: 62% used · Session: 0 AIC used") == 62
     assert common.json_for_copilot(None)["reason"] == "unavailable"
     assert common.json_for_copilot({"provider": "copilot", "monthly": {"remaining": 1}, "ai_credits": {"used": 2}}, False).get("ai_credits") is None
     assert common.output_is_retryable(0, "chapter 429") is False
@@ -404,6 +405,52 @@ def test_common_process_helpers_and_estimators(env: dict[str, str], tmp_path: Pa
     )
     assert common.estimate_remaining_time_from_log("p", "w", 40, env | {"LLM_USAGE_NOW_EPOCH": "1120", "LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS": "9999"}) == "4m"
     assert common.estimate_remaining_time_from_log("p", "w", 0, env) == "-"
+
+
+def test_estimate_remaining_time_survives_resets_and_gaps(env: dict[str, str]) -> None:
+    cache = common.usage_cache_dir(env)
+    cache.mkdir(parents=True, exist_ok=True)
+    base = 1_000_000
+    rows = [
+        (base, 100),
+        (base + 3600, 90),
+        (base + 7200, 100),
+        (base + 10800, 90),
+        (base + 18000, 80),
+    ]
+    (cache / "llm-usage.log").write_text(
+        "".join(f'{{"ts":{ts},"provider":"p","window":"w","remaining":{rem}}}\n' for ts, rem in rows),
+        encoding="utf-8",
+    )
+    now_env = env | {"LLM_USAGE_NOW_EPOCH": str(base + 18000)}
+    # reset at +7200 is skipped, 2h gap at the end exceeds max_gap: 20% over 7200s remains
+    assert common.estimate_remaining_time_from_log("p", "w", 50, now_env) == "5h"
+    stale_env = env | {"LLM_USAGE_NOW_EPOCH": str(base + 18601)}
+    assert common.estimate_remaining_time_from_log("p", "w", 50, stale_env) == "-"
+    assert common.estimate_remaining_time_from_log("p", "w", 50, stale_env | {"LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS": "0"}) == "5h"
+    assert common.estimate_remaining_time_from_log("p", "w", 50, now_env | {"LLM_USAGE_REMAINING_TIME_LOOKBACK_SECONDS": "60"}) == "-"
+    # disabling the gap filter also counts the trailing 2h decrease: 30% over 14400s
+    assert common.estimate_remaining_time_from_log("p", "w", 50, now_env | {"LLM_USAGE_REMAINING_TIME_MAX_GAP_SECONDS": "0"}) == "6h 40m"
+    assert common.estimate_remaining_time_from_log("p", "w", 50, now_env | {"LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS": "bad"}) == "5h"
+
+
+def test_prune_usage_log(env: dict[str, str]) -> None:
+    cache = common.usage_cache_dir(env)
+    cache.mkdir(parents=True, exist_ok=True)
+    log = cache / "llm-usage.log"
+    common.prune_usage_log(env)
+    lines = [f'{{"ts":{i},"provider":"p","window":"w","remaining":50}}' for i in range(100)]
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    common.prune_usage_log(env | {"LLM_USAGE_LOG_MAX_BYTES": "0"})
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 100
+    common.prune_usage_log(env)
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 100
+    common.prune_usage_log(env | {"LLM_USAGE_LOG_MAX_BYTES": "10", "LLM_USAGE_LOG_TAIL_LINES": "5"})
+    kept = log.read_text(encoding="utf-8").splitlines()
+    assert len(kept) == 5
+    assert kept[-1] == lines[-1]
+    common.prune_usage_log(env | {"LLM_USAGE_LOG_MAX_BYTES": "bad"})
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 5
 
 
 def test_common_filesystem_provider_paths(env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -598,6 +645,10 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
             fake_proc.append(list(args))
 
     monkeypatch.setattr(common.subprocess, "Popen", PopenStub)
+    assert common.read_copilot(env | {"LLM_USAGE_COPILOT_CACHE_TTL": "999", "LLM_USAGE_COPILOT_REFRESH_WAIT": "0"})["reason"] == "refresh-pending"
+    (cache_dir / "copilot-usage.json").write_text('{"provider":"copilot","available":false,"reason":"format-changed"}', encoding="utf-8")
+    assert common.read_copilot(env | {"LLM_USAGE_COPILOT_CACHE_TTL": "999", "LLM_USAGE_COPILOT_REFRESH_WAIT": "0"})["reason"] == "refresh-pending"
+    (cache_dir / "copilot-usage.json").write_text('{"provider":"copilot","available":false,"reason":"timeout"}', encoding="utf-8")
     assert common.read_copilot(env | {"LLM_USAGE_COPILOT_CACHE_TTL": "999", "LLM_USAGE_COPILOT_REFRESH_WAIT": "0"})["reason"] == "refresh-pending"
     fresh_env = env | {"XDG_CACHE_HOME": str(tmp_path / "fresh-xdg"), "LLM_USAGE_COPILOT_CACHE_TTL": "999", "LLM_USAGE_COPILOT_REFRESH_WAIT": "0"}
     assert common.read_copilot(fresh_env)["reason"] == "refresh-pending"
