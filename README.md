@@ -159,8 +159,6 @@ All tools keep their runtime data under one root, `${XDG_CACHE_HOME:-$HOME/.cach
 - `llm-tools/llm-scheduler/logs/` — per-run scheduler log directories.
 - `llm-tools/ralph-robin/` — rotation `state.json` and per-run `logs/`.
 
-Legacy locations from older versions (`~/.cache/llm-usage`, `~/.cache/llm-scheduler`, `~/.cache/ralph-robin`) are moved to the new root automatically on first run. The `llm-usage.log` that used to be written beside the scripts now lives in `llm-tools/llm-usage/`.
-
 `llm-scheduler` creates a per-run directory under `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-scheduler/logs` by default. It uses restrictive permissions where possible and writes:
 
 - `run.log` for human-readable audit output.
