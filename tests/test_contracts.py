@@ -16,6 +16,9 @@ COPILOT_AVAILABLE = '{"available":true,"monthly":{"remaining":25}}'
 
 def seed_provider_data(env: dict[str, str]) -> None:
     home = Path(env["HOME"])
+    # Pin "now" before the fixture reset times so windows read as fresh (not
+    # rolled over); otherwise freshen_window would zero them out as stale.
+    env.setdefault("LLM_USAGE_NOW_EPOCH", "1780272000")  # 2026-06-01T00:00:00Z
     (home / ".codex" / "sessions" / "s.jsonl").write_text(
         '{"rate_limits":{"primary":{"used_percent":53,"window_minutes":300,"resets_at":"2026-06-02T13:49:00Z"},"secondary":{"used_percent":59,"window_minutes":10080,"resets_at":"2026-06-07T16:25:00Z"},"spark":{"primary":{"used_percent":99,"resets_at":"2026-06-02T22:26:00Z"},"secondary":{"used_percent":96,"resets_at":"2026-06-08T17:49:00Z"}}}}\n',
         encoding="utf-8",
@@ -53,6 +56,16 @@ def test_usage_json_table_statusline_and_cache(env: dict[str, str]) -> None:
     assert "Copilot" in table.stdout
     assert "38%" in table.stdout
     assert "copilot cli" in table.stdout
+    assert "LLM Usage" in table.stdout
+    assert "Ready" in table.stdout
+    assert "Guidance" in table.stdout
+    assert "Remaining" in table.stdout
+    assert "Resets in" in table.stdout
+    assert "Pace" not in table.stdout
+    assert "Pace / Gate" not in table.stdout
+    assert "open" not in table.stdout
+    assert "closed" not in table.stdout
+    assert "Use" not in table.stdout.splitlines()[4]
     hidden = run_cmd(["./llm-usage", "--hide-codex-spark"], env)
     assert "GPT-5.3 Spark" not in hidden.stdout
     status = subprocess.run(

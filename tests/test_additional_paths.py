@@ -45,6 +45,136 @@ def test_usage_main_inprocess_and_render_helpers(env: dict[str, str], monkeypatc
     assert "Missing" in out
 
 
+def test_usage_dashboard_ready_guidance_and_reset(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    cfg = usage.Config()
+    cfg.color_enabled = False
+
+    assert usage.render_ready(10, cfg) == "yes"
+    assert usage.render_ready(0, cfg) == "no"
+    assert usage.classify_budget_guidance("weekly", 60, 1000 + int(3.5 * 86400)).text == "↑ headroom"
+    assert usage.classify_budget_guidance("weekly", 50, 1000 + int(3.5 * 86400)).text == "= on pace"
+    assert usage.classify_budget_guidance("weekly", 40, 1000 + int(3.5 * 86400)).text == "↓ conserve"
+
+    assert usage.format_reset(1000 + 36 * 60, cfg) == "36m"
+    assert usage.format_reset(1000 + 4 * 3600 + 34 * 60, cfg) == "4h 34m"
+    assert usage.format_reset(1000 + 5 * 86400 + 2 * 3600, cfg) == "5d 2h"
+
+    rows = [
+        usage.UsageRow("Codex", "5h", 70, "70%", 1000 + 9000, "fixture"),
+        usage.UsageRow("Codex", "weekly", 40, "40%", 1000 + int(3.5 * 86400), "fixture"),
+        usage.UsageRow("Claude", "5h", 0, "0%", 1000 + 1800, "fixture"),
+        usage.UsageRow("Claude", "weekly", 91, "91%", 1000 + int(5 * 86400), "fixture"),
+    ]
+    usage.print_table_header(cfg)
+    usage.print_usage_rows(cfg, rows)
+    out = capsys.readouterr().out
+    assert "Ready" in out
+    assert "Guidance" in out
+    assert "yes" in out
+    assert "no" in out
+    assert "↑ headroom" in out
+    assert "↓ conserve" in out
+    assert "× empty" in out
+    assert "open" not in out
+    assert "closed" not in out
+    assert "Pace / Gate" not in out
+    assert "╞" not in out
+    assert "◆" not in out
+    assert "Use" not in out.splitlines()[0]
+
+
+@pytest.mark.parametrize("window", ["weekly", "monthly"])
+def test_usage_budget_guidance_compares_remaining_to_time_left(monkeypatch: pytest.MonkeyPatch, window: str) -> None:
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    duration = usage.window_seconds(window)
+    assert duration is not None
+    reset = 1000 + int(duration / 2)
+
+    assert usage.classify_budget_guidance(window, 56, reset).text == "↑ headroom"
+    assert usage.classify_budget_guidance(window, 54, reset).text == "= on pace"
+    assert usage.classify_budget_guidance(window, 44, reset).text == "↓ conserve"
+    assert usage.classify_budget_guidance(window, 50, None).text == "· no rate data"
+
+
+def test_usage_session_guidance_forecasts_runout(env: dict[str, str]) -> None:
+    env = env | {
+        "LLM_USAGE_NOW_EPOCH": "1600",
+        "LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS": "9999",
+        "XDG_CACHE_HOME": str(Path(env["HOME"]) / ".cache"),
+    }
+    cache = common.usage_cache_dir(env)
+    cache.mkdir(parents=True, exist_ok=True)
+    log = cache / "llm-usage.log"
+    log.write_text("", encoding="utf-8")
+
+    assert usage.classify_session_guidance("Codex", "5h", 0, 3600, env).text == "× empty"
+    assert usage.classify_session_guidance("Codex", "5h", 20, 3600, env).text == "· no rate data"
+
+    log.write_text(
+        '{"ts":1000,"provider":"Codex","window":"5h","remaining":20}\n'
+        '{"ts":1600,"provider":"Codex","window":"5h","remaining":10}\n',
+        encoding="utf-8",
+    )
+    assert usage.classify_session_guidance("Codex", "5h", 10, 3600, env).text == "! empty in 10m"
+
+    log.write_text(
+        '{"ts":1000,"provider":"Codex","window":"5h","remaining":90}\n'
+        '{"ts":1600,"provider":"Codex","window":"5h","remaining":80}\n',
+        encoding="utf-8",
+    )
+    assert usage.classify_session_guidance("Codex", "5h", 80, 2600, env).text == "✓ lasts until reset"
+
+
+def test_usage_table_snapshot_has_guidance_and_no_old_dial(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    cfg = usage.Config()
+    cfg.color_enabled = False
+    rows = [
+        usage.UsageRow("Codex", "5h", 84, "84%", 1000 + 4 * 3600, "fixture"),
+        usage.UsageRow("Codex", "weekly", 33, "33%", 1000 + 5 * 86400 + 3600, "fixture"),
+        usage.UsageRow("Claude", "5h", 0, "0%", 1000 + 120, "fixture"),
+        usage.UsageRow("Claude", "weekly", 91, "91%", 1000 + 4 * 86400 + 23 * 3600, "fixture"),
+        usage.UsageRow("Copilot", "monthly", 36, "36%", 1000 + 17 * 86400 + 10 * 3600, "fixture"),
+    ]
+
+    usage.print_dashboard_header(cfg)
+    usage.print_table_header(cfg)
+    usage.print_usage_rows(cfg, rows)
+    out = capsys.readouterr().out
+
+    assert out.startswith("LLM Usage · ")
+    assert "\n\nBars: █ available · ░ spent" in out
+    assert "Bars: █ available · ░ spent" in out
+    assert "Guidance:" in out
+    assert "Tool       Ready   Window    Remaining" in out
+    assert "Codex      yes     5h         84% ████████░░" in out
+    assert "                   weekly     33% ███░░░░░░░   ↓ conserve" in out
+    assert "Claude     no      5h          0% ░░░░░░░░░░   × empty" in out
+    assert "╞" not in out
+    assert "◆" not in out
+    assert "──╞═══╡──◆" not in out
+
+
+def test_usage_unicode_column_alignment_is_stable(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    cfg = usage.Config()
+    cfg.color_enabled = False
+    rows = [
+        usage.UsageRow("Codex", "5h", 84, "84%", 1000 + 4 * 3600, "fixture"),
+        usage.UsageRow("Codex", "weekly", 33, "33%", 1000 + 5 * 86400, "fixture"),
+    ]
+
+    usage.print_table_header(cfg)
+    usage.print_usage_rows(cfg, rows)
+    lines = [line for line in capsys.readouterr().out.splitlines() if line]
+    width = usage.table_fixed_width(cfg)
+    assert all(usage.visible_len(line) == width for line in lines)
+    assert width <= 120
+
+
 def test_scheduler_argument_branches(env: dict[str, str], tmp_path: Path) -> None:
     cases = [
         ["./llm-scheduler", "--tool"],
@@ -255,6 +385,78 @@ def test_ralph_injects_selected_provider_context(env: dict[str, str], fake_provi
     assert "codex: usable" in captured
     assert "Do not run provider-specific llm-scheduler --suspend-until-ready commands" in captured
     assert prompt in captured
+
+
+def test_ensure_copilot_footer_settings(env: dict[str, str], tmp_path: Path) -> None:
+    home = tmp_path / "copilot-home"
+    cenv = env | {"COPILOT_HOME": str(home)}
+    settings = home / "settings.json"
+    # Fresh install: file is created with the footer items we scrape enabled.
+    common.ensure_copilot_footer_settings(cenv)
+    assert json.loads(settings.read_text())["footer"] == {"showQuota": True, "showAiUsed": True}
+    # Idempotent: an already-enabled file is left byte-for-byte untouched.
+    before = settings.stat().st_mtime_ns
+    common.ensure_copilot_footer_settings(cenv)
+    assert settings.stat().st_mtime_ns == before
+    # Existing user settings are preserved while the required flags are flipped on.
+    settings.write_text(json.dumps({"footer": {"showQuota": False, "showSandbox": True}, "beep": True}))
+    common.ensure_copilot_footer_settings(cenv)
+    data = json.loads(settings.read_text())
+    assert data["footer"] == {"showQuota": True, "showSandbox": True, "showAiUsed": True}
+    assert data["beep"] is True
+    # Opt-out env disables the write entirely.
+    home2 = tmp_path / "copilot-home-2"
+    common.ensure_copilot_footer_settings(cenv | {"COPILOT_HOME": str(home2), "LLM_USAGE_COPILOT_NO_SETTINGS_WRITE": "1"})
+    assert not (home2 / "settings.json").exists()
+    # Unparseable settings are left untouched rather than clobbered.
+    home3 = tmp_path / "copilot-home-3"
+    home3.mkdir()
+    (home3 / "settings.json").write_text("{not json")
+    common.ensure_copilot_footer_settings(cenv | {"COPILOT_HOME": str(home3)})
+    assert (home3 / "settings.json").read_text() == "{not json"
+
+
+def test_freshen_stale_windows() -> None:
+    now = 1000
+    # Reset already passed: window rolled over -> full quota, reset cleared.
+    assert common.freshen_window({"used": 90.0, "resets_at": 500, "window_minutes": 300}, now) == {
+        "used": 0.0,
+        "resets_at": None,
+        "window_minutes": 300,
+    }
+    # Future reset is left untouched (same object returned).
+    future = {"used": 90.0, "resets_at": 2000, "window_minutes": 300}
+    assert common.freshen_window(future, now) is future
+    # No reset and non-dict inputs pass through unchanged.
+    no_reset = {"used": 90.0, "resets_at": None}
+    assert common.freshen_window(no_reset, now) is no_reset
+    assert common.freshen_window(None, now) is None
+    # Provider-level walk freshens top-level and per-row windows using NOW_EPOCH.
+    obj = {
+        "five_hour": {"used": 50.0, "resets_at": 500},
+        "week": {"used": 10.0, "resets_at": 5000},
+        "rows": [{"five_hour": {"used": 70.0, "resets_at": 400}, "week": {"used": 5.0, "resets_at": 6000}}],
+    }
+    out = common.freshen_provider_windows(obj, {"LLM_USAGE_NOW_EPOCH": "1000"})
+    assert out["five_hour"] == {"used": 0.0, "resets_at": None}
+    assert out["week"]["used"] == 10.0
+    assert out["rows"][0]["five_hour"]["used"] == 0.0
+    assert out["rows"][0]["week"]["used"] == 5.0
+
+
+def test_read_codex_freshens_elapsed_window(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", env["HOME"])
+    home = Path(env["HOME"])
+    (home / ".codex" / "sessions").mkdir(parents=True, exist_ok=True)
+    # 5h reset 900 is in the past relative to NOW_EPOCH 1000; weekly 9999 is future.
+    (home / ".codex" / "sessions" / "r.jsonl").write_text(
+        '{"rate_limits":{"primary":{"used_percent":98,"resets_at":900},"secondary":{"used_percent":65,"resets_at":9999}}}\n',
+        encoding="utf-8",
+    )
+    codex = common.read_codex(env | {"LLM_USAGE_NOW_EPOCH": "1000"})
+    assert codex is not None
+    assert codex["five_hour"] == {"used": 0.0, "resets_at": None, "window_minutes": 300}
+    assert codex["week"]["used"] == 65  # unexpired weekly is preserved
 
 
 def test_common_extra_branches(env: dict[str, str], fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -528,6 +730,36 @@ def test_copilot_refresh_module(env: dict[str, str], tmp_path: Path, monkeypatch
     assert data["monthly"]["remaining"] == 90
     assert not lock.exists()
     assert copilot_refresh.main([]) == 2
+
+
+def test_copilot_refresh_wait_budget_cold_start_is_long(env: dict[str, str]) -> None:
+    # Warm cache: short wait so we serve the stale value quickly.
+    assert common.copilot_refresh_wait_budget(env, cache_present=True) == 1.0
+    # Cold start: wait long enough for the first capture (timeout + margin).
+    assert common.copilot_refresh_wait_budget(env, cache_present=False) == 12.0
+    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_TIMEOUT": "4"}, cache_present=False) == 6.0
+    # Explicit override always wins, including the 0 used by other tests.
+    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_REFRESH_WAIT": "0"}, cache_present=False) == 0.0
+    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_REFRESH_WAIT": "bad"}, cache_present=True) == 1.0
+
+
+def test_copilot_cold_start_returns_refreshed_data(env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fresh = env | {"XDG_CACHE_HOME": str(tmp_path / "cold-xdg"), "LLM_USAGE_COPILOT_CACHE_TTL": "999"}
+    cache = common.usage_cache_dir(fresh) / "copilot-usage.json"
+    lock = common.usage_cache_dir(fresh) / "copilot-refresh.lock"
+
+    class PopenStub:
+        def __init__(self, args: list[str], **kwargs: object) -> None:
+            # Stand in for the background refresh: land real data and release the lock.
+            cache.write_text('{"provider":"copilot","monthly":{"remaining":77}}', encoding="utf-8")
+            try:
+                lock.rmdir()
+            except OSError:
+                pass
+
+    monkeypatch.setattr(common.subprocess, "Popen", PopenStub)
+    # No cache exists yet, so without the cold-start wait this would be "refresh-pending".
+    assert common.read_copilot(fresh)["monthly"]["remaining"] == 77
 
 
 def test_validation_and_selection_edge_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -972,6 +1204,39 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
     assert usage.colorize_percent("29%", ucfg).startswith("\x1b[0;33m")
     assert usage.colorize_percent("30%", ucfg).startswith("\x1b[0;32m")
     assert usage.colorize_percent("bad%", ucfg) == "bad%"
+    plain = usage.Config()
+    plain.color_enabled = False
+    assert usage.progress_bar(100) == "█" * 10
+    assert usage.progress_bar(0) == "░" * 10
+    assert usage.progress_bar(35) == "█" * 4 + "░" * 6
+    assert usage.render_remaining("100%", plain) == "100% ██████████"
+    assert usage.render_remaining("35%", plain) == " 35% ████░░░░░░"
+    assert usage.render_remaining("unavailable", plain) == "unavailable"
+    assert usage.render_remaining("-", plain) == "-"
+    assert usage.render_remaining("9%", ucfg).startswith("\x1b[0;31m")
+    # Daily budget helper remains available to scheduler/Ralph paths.
+    at1000 = {"LLM_USAGE_NOW_EPOCH": "1000"}
+    assert common.daily_budget_percent(50, 1000 + 86400, at1000) == 50.0  # 1 day out -> 50%
+    assert common.daily_budget_percent(20, 1000 + 7200, at1000) == 20.0  # 2h out -> all remaining
+    assert round(common.daily_budget_percent(35, 1000 + (5 * 86400), at1000), 1) == 7.0
+    assert common.daily_budget_percent(None, 2000, at1000) is None
+    assert common.daily_budget_percent(50, None, at1000) is None
+    assert common.daily_budget_percent(50, 900, at1000) is None  # reset already passed
+    assert usage.render_daily_budget(None, plain) == "· no rate data"
+    assert usage.render_daily_budget(60, plain, 50) == "↑ headroom"
+    assert usage.render_daily_budget(50, plain, 50) == "= on pace"
+    assert usage.render_daily_budget(40, plain, 50) == "↓ conserve"
+    assert usage.render_daily_budget(50, ucfg, 50).startswith("\x1b[0;32m")
+    assert usage.render_daily_budget(60, ucfg, 50).startswith("\x1b[0;36m")
+    assert usage.render_daily_budget(40, ucfg, 50).startswith("\x1b[0;33m")
+    assert usage.render_guidance_info(usage.GuidanceInfo("× empty", "empty"), ucfg).startswith("\x1b[0;31m")
+    assert usage.render_gate(1, plain) == "yes"
+    assert usage.render_gate(0, plain) == "no"
+    assert usage.render_gate(1, ucfg) == "yes"
+    assert usage.render_gate(0, ucfg).startswith("\x1b[1;31m")
+    assert usage.render_pace_or_gate("5h", 94, plain) == "· no rate data"
+    assert usage.is_short_window("5h") is True
+    assert usage.is_budget_window("weekly") is True
     usage.print_codex_rows(ucfg, {"source": "src", "five_hour": {"used": 10}, "week": {"used": 20}})
     usage.print_copilot_rows(ucfg, None)
     out = capsys.readouterr().out

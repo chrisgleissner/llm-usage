@@ -210,6 +210,30 @@ def copilot_monthly_reset_epoch(env: dict[str, str] | None = None) -> int | None
     return int(time.mktime(nxt.timetuple())) + offset * 86400
 
 
+def copilot_monthly_window_days(env: dict[str, str] | None = None) -> float:
+    env = env or os.environ
+    try:
+        offset = int(env.get("LLM_USAGE_COPILOT_MONTHLY_RESET_OFFSET_DAYS", "0"))
+    except ValueError:
+        offset = 0
+    now = now_epoch(env)
+    dt = datetime.fromtimestamp(now)
+    this = datetime(dt.year, dt.month, 1)
+    if dt.month == 12:
+        nxt = datetime(dt.year + 1, 1, 1)
+    else:
+        nxt = datetime(dt.year, dt.month + 1, 1)
+    this_epoch = int(time.mktime(this.timetuple())) + offset * 86400
+    next_epoch = int(time.mktime(nxt.timetuple())) + offset * 86400
+    if this_epoch > now:
+        if dt.month == 1:
+            prev = datetime(dt.year - 1, 12, 1)
+        else:
+            prev = datetime(dt.year, dt.month - 1, 1)
+        return max((this_epoch - (int(time.mktime(prev.timetuple())) + offset * 86400)) / 86400.0, 1.0)
+    return max((next_epoch - this_epoch) / 86400.0, 1.0)
+
+
 def num(value: Any) -> float | None:
     if value is None:
         return None
@@ -228,6 +252,29 @@ def remaining_from_used(used: Any) -> float | None:
     if n is None:
         return None
     return min(100.0, max(0.0, 100.0 - n))
+
+
+def daily_budget_percent(remaining: Any, reset: Any, env: dict[str, str] | None = None) -> float | None:
+    """Bounded daily budget for this window.
+
+    This is the share of the full allowance that can be spent today while pacing
+    the window to its reset. It is capped by the remaining quota: a 5h window
+    resetting soon can invite spending everything left, but never more than
+    everything left.
+
+    Equals ``remaining% / max(days_until_reset, 1)``. Returns ``None`` when
+    remaining or the reset time is unknown, or the reset is not in the future.
+    """
+    rem = num(remaining)
+    if rem is None:
+        return None
+    epoch = parse_epoch(reset)
+    if epoch is None:
+        return None
+    seconds = epoch - now_epoch(env)
+    if seconds <= 0:
+        return None
+    return rem / max(seconds / 86400.0, 1.0)
 
 
 def fmt_number(value: Any) -> str:
@@ -456,6 +503,45 @@ def normalize_claude_obj(obj: Any, source: str) -> dict[str, Any] | None:
     }
 
 
+def freshen_window(window: Any, now: int) -> Any:
+    """Drop a window's stale snapshot once its reset time has passed.
+
+    Codex/Claude usage records are read from persisted session logs, so the most
+    recent on-disk snapshot can predate the current window. When a window's
+    ``resets_at`` is already in the past, the window has rolled over since the
+    snapshot: quota is fully restored (used -> 0, i.e. 100% remaining) and the old
+    reset time is meaningless (the next reset is unknown until the window is used
+    again). This mirrors what the Codex/Claude CLIs themselves show after a reset.
+    """
+    if not isinstance(window, dict):
+        return window
+    epoch = parse_epoch(window.get("resets_at"))
+    if epoch is not None and epoch <= now:
+        out = dict(window)
+        out["used"] = 0.0
+        out["resets_at"] = None
+        return out
+    return window
+
+
+def freshen_provider_windows(obj: Any, env: dict[str, str] | None = None) -> Any:
+    """Apply :func:`freshen_window` to every window in a normalized provider dict."""
+    if not isinstance(obj, dict):
+        return obj
+    now = now_epoch(env)
+    for key in ("five_hour", "week"):
+        if key in obj:
+            obj[key] = freshen_window(obj.get(key), now)
+    rows = obj.get("rows")
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, dict):
+                for key in ("five_hour", "week"):
+                    if key in row:
+                        row[key] = freshen_window(row.get(key), now)
+    return obj
+
+
 def latest_matching_line(root: Path, predicate: Any, env: dict[str, str] | None = None) -> str | None:
     env = env or os.environ
     if not root.is_dir():
@@ -486,7 +572,7 @@ def read_codex(env: dict[str, str] | None = None) -> dict[str, Any] | None:
     line = latest_matching_line(root, lambda o: get_path(o, (("rate_limits",), ("rateLimits",), ("rateLimits", "rateLimits"), ("msg", "rate_limits"), ("msg", "rateLimits"), ("payload", "rate_limits"), ("payload", "rateLimits"))) is not None, env)
     if not line:
         return None
-    return normalize_codex_obj(json.loads(line), "~/.codex/sessions")
+    return freshen_provider_windows(normalize_codex_obj(json.loads(line), "~/.codex/sessions"), env)
 
 
 def read_claude_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
@@ -528,6 +614,10 @@ def read_claude_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
 
 def read_claude(env: dict[str, str] | None = None) -> dict[str, Any] | None:
     env = env or os.environ
+    return freshen_provider_windows(_read_claude_raw(env), env)
+
+
+def _read_claude_raw(env: dict[str, str]) -> dict[str, Any] | None:
     api = read_claude_api(env)
     if api:
         return api
@@ -550,6 +640,58 @@ def find_copilot_cli() -> str | None:
     return shutil.which("copilot") or shutil.which("github-copilot")
 
 
+def copilot_config_dir(env: dict[str, str] | None = None) -> Path:
+    env = env or os.environ
+    return Path(env.get("COPILOT_HOME") or (Path.home() / ".copilot"))
+
+
+# Footer items we screen-scrape are off by default on a fresh Copilot install and
+# only appear once the user enables them via /statusline. We seed them so usage is
+# visible without any manual setup. "quota" drives "Plan: N% used" (and legacy
+# premium requests); "ai-used" drives "Session: N AIC used".
+COPILOT_REQUIRED_FOOTER_KEYS = ("showQuota", "showAiUsed")
+
+
+def ensure_copilot_footer_settings(env: dict[str, str] | None = None) -> None:
+    """Make sure the Copilot footer exposes the quota/usage items we parse.
+
+    Non-destructive: only the required footer flags are flipped to true, every
+    other user setting is preserved, and the file is rewritten only when a flag
+    actually changes. Any failure is swallowed so capture never breaks.
+    """
+    env = env or os.environ
+    if env.get("LLM_USAGE_COPILOT_NO_SETTINGS_WRITE", "0") == "1":
+        return
+    settings_path = copilot_config_dir(env) / "settings.json"
+    try:
+        data: dict[str, Any] = {}
+        if settings_path.is_file():
+            raw = settings_path.read_text(encoding="utf-8").strip()
+            if raw:
+                parsed = json.loads(raw)
+                if not isinstance(parsed, dict):
+                    # Unexpected shape: leave the user's file untouched.
+                    return
+                data = parsed
+        footer = data.get("footer")
+        if not isinstance(footer, dict):
+            footer = {}
+        changed = False
+        for key in COPILOT_REQUIRED_FOOTER_KEYS:
+            if footer.get(key) is not True:
+                footer[key] = True
+                changed = True
+        if not changed:
+            return
+        data["footer"] = footer
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = settings_path.with_name(f"{settings_path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(settings_path)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return
+
+
 def strip_ansi(text: str) -> str:
     text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", text)
     text = re.sub(r"\x1b\[[0-9;?<>=-]*[ -/]*[@-~]", "", text)
@@ -570,6 +712,10 @@ def capture_copilot_screen(env: dict[str, str] | None = None) -> tuple[str, str]
     capture_cwd = env.get("LLM_USAGE_COPILOT_CWD") or str(Path(__file__).resolve().parent.parent)
     helper_cmd = env.get("LLM_USAGE_COPILOT_CAPTURE_CMD", "")
     timeout_seconds = int(env.get("LLM_USAGE_COPILOT_TIMEOUT", "10") or "10")
+    if not helper_cmd:
+        # The real CLI only renders the quota/usage footer when these items are
+        # enabled, so seed them before launching (no-op once already on).
+        ensure_copilot_footer_settings(env)
     argv = ["bash", "-lc", helper_cmd] if helper_cmd else [cli, "--screen-reader", "-C", capture_cwd]
     try:
         status, output = run_pty_capture(
@@ -627,6 +773,24 @@ def read_copilot_live(env: dict[str, str] | None = None) -> dict[str, Any]:
     elif screen:
         reason = "format-changed"
     return {"provider": "copilot", "source": "copilot cli", "available": False, "reason": reason}
+
+
+def copilot_refresh_wait_budget(env: dict[str, str], cache_present: bool) -> float:
+    if cache_present:
+        # Warm cache: a stale entry is already on disk, so keep the wait short and
+        # serve the previous value while the background refresh catches up.
+        default = "1"
+    else:
+        # Cold start (e.g. right after install): no cache exists yet, so a short
+        # wait would always fall through to "refresh-pending" and show nothing
+        # until a later invocation. Wait long enough for the first background
+        # capture to land so usage appears on the very first run.
+        default = str(int(env.get("LLM_USAGE_COPILOT_TIMEOUT", "10") or "10") + 2)
+    raw = env.get("LLM_USAGE_COPILOT_REFRESH_WAIT", default) or default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return float(default)
 
 
 def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
@@ -695,8 +859,8 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-    wait_budget = float(env.get("LLM_USAGE_COPILOT_REFRESH_WAIT", "1") or "1")
-    deadline = time.time() + max(0.0, wait_budget)
+    wait_budget = copilot_refresh_wait_budget(env, cache.is_file() and cache.stat().st_size > 0)
+    deadline = time.time() + wait_budget
     while time.time() < deadline:
         if cache.is_file() and cache.stat().st_size > 0 and int(time.time()) - int(cache.stat().st_mtime) <= ttl:
             cached = cached_result()
@@ -824,14 +988,14 @@ REMAINING_TIME_WINDOW_SECONDS = {
 }
 
 
-def estimate_remaining_time_from_log(provider: str, window: str, remaining: Any, env: dict[str, str] | None = None) -> str:
+def estimate_remaining_seconds_from_log(provider: str, window: str, remaining: Any, env: dict[str, str] | None = None) -> int | None:
     env = env or os.environ
     rem = num(remaining)
     if rem is None or rem <= 0:
-        return "-"
+        return None
     path = usage_cache_dir(env) / "llm-usage.log"
     if not path.is_file() or path.stat().st_size == 0:
-        return "-"
+        return None
     try:
         max_stale = int(env.get("LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS", "600") or "600")
         lookback = int(env.get("LLM_USAGE_REMAINING_TIME_LOOKBACK_SECONDS", "259200") or "259200")
@@ -852,7 +1016,7 @@ def estimate_remaining_time_from_log(provider: str, window: str, remaining: Any,
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-usage_log_tail_lines(env):]
     except OSError:
-        return "-"
+        return None
     for line in lines:
         obj = read_json_text(line)
         if not isinstance(obj, dict) or obj.get("provider") != provider or obj.get("window") != window:
@@ -863,9 +1027,9 @@ def estimate_remaining_time_from_log(provider: str, window: str, remaining: Any,
             continue
         samples.append((int(ts), value))
     if not samples:
-        return "-"
+        return None
     if max_stale > 0 and now - samples[-1][0] > max_stale:
-        return "-"
+        return None
     # Refuse to extrapolate a window-scale ETA from a sliver of history: a single
     # coarse step (e.g. a stale reading jumping to the current value) would
     # otherwise be read as a sustained burn rate and produce a wildly short
@@ -875,7 +1039,7 @@ def estimate_remaining_time_from_log(provider: str, window: str, remaining: Any,
     window_seconds = REMAINING_TIME_WINDOW_SECONDS.get(window, 0)
     min_span = max(min_span_floor, int(window_seconds * min_span_fraction))
     if observed_span < min_span:
-        return "-"
+        return None
     prev_ts: int | None = None
     prev_rem = 0.0
     total_reduction = 0.0
@@ -891,9 +1055,16 @@ def estimate_remaining_time_from_log(provider: str, window: str, remaining: Any,
         prev_ts = ts
         prev_rem = value
     if total_seconds <= 0 or total_reduction <= 0:
-        return "-"
+        return None
     remaining_seconds = int(rem * total_seconds / total_reduction)
     if remaining_seconds <= 0:
+        return None
+    return remaining_seconds
+
+
+def estimate_remaining_time_from_log(provider: str, window: str, remaining: Any, env: dict[str, str] | None = None) -> str:
+    remaining_seconds = estimate_remaining_seconds_from_log(provider, window, remaining, env)
+    if remaining_seconds is None:
         return "-"
     if remaining_seconds < 60:
         return "1m"

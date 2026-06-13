@@ -10,6 +10,19 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+LOCAL_COMMANDS = {"./llm-usage", "./llm-scheduler", "./ralph-robin"}
+try:
+    import coverage as _coverage
+
+    COVERAGE_SITE = str(Path(_coverage.__file__).resolve().parents[1])
+except Exception:
+    COVERAGE_SITE = ""
+
+
+def local_command_args(args: list[str]) -> list[str]:
+    if not args or args[0] not in LOCAL_COMMANDS:
+        return args
+    return [sys.executable, *args]
 
 
 @pytest.fixture()
@@ -25,7 +38,7 @@ def env(tmp_path: Path) -> dict[str, str]:
         {
             "HOME": str(home),
             "PATH": f"{fake_bin}:{Path(sys.executable).parent}:{ROOT}:{out.get('PATH', '')}",
-            "PYTHONPATH": str(ROOT),
+            "PYTHONPATH": os.pathsep.join(p for p in (str(ROOT), COVERAGE_SITE) if p),
             "COVERAGE_PROCESS_START": str(ROOT / "pyproject.toml"),
             "LLM_USAGE_COPILOT_CACHE_TTL": "0",
             "LLM_SCHEDULER_HEADLESS": "1",
@@ -92,8 +105,10 @@ sys.stdout.flush()
 
 
 def run_cmd(args: list[str], env: dict[str, str], **kwargs) -> subprocess.CompletedProcess:
+    args = local_command_args(args)
     return subprocess.run(args, cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, **kwargs)
 
 
 def run_cmd_bytes(args: list[str], env: dict[str, str], **kwargs) -> subprocess.CompletedProcess:
+    args = local_command_args(args)
     return subprocess.run(args, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, **kwargs)

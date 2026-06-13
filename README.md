@@ -116,15 +116,31 @@ llm-usage --statusline
 By default, it shows all supported providers:
 
 ```bash
-Last refreshed: 2026-06-12 15:59:17
-Tool             Window         Remaining     Remaining Time   Resets             Time to Reset
---------------   ------------   -----------   --------------   ----------------   ------------
-Codex            5h             21%           -                2026-06-12 16:25   26m         
-Codex            weekly         51%           -                2026-06-18 15:00   5d 23h 1m   
-Claude           5h             6%            2m               2026-06-12 16:30   30m         
-Claude           weekly         82%           7h 46m           2026-06-18 13:00   5d 21h      
-Copilot          monthly        38%           -                2026-07-01 00:00   18d 8h 
+LLM Usage · 13:03
+
+Bars: █ available · ░ spent
+Guidance: 5h rows forecast runout; weekly/monthly rows compare remaining quota to time left.
+          ✓ lasts until reset · ! empty before reset · × empty · ↑ headroom · = on pace · ↓ conserve
+
+Tool       Ready   Window    Remaining         Guidance              Resets in
+────────   ─────   ───────   ───────────────   ───────────────────   ──────────
+Codex      yes     5h        90% █████████░    ✓ lasts until reset   4h 34m
+                   weekly    34% ███░░░░░░░    ↓ conserve            5d 2h
+
+Claude     no      5h         0% ░░░░░░░░░░    × empty               36m
+                   weekly    91% █████████░    ↑ headroom            5d
+
+Copilot    yes     monthly   36% ████░░░░░░    ↓ conserve            17d 11h
 ```
+
+The table is meant to answer four questions quickly:
+
+- **Ready** — `yes` means every blocking quota window for that tool has usable capacity now; `no` means at least one blocking window must reset.
+- **Guidance** — `5h` rows forecast whether current burn lasts until reset; weekly and monthly rows compare remaining quota to a linear budget pace.
+- **Remaining** — remaining quota, with the exact percentage before the bar.
+- **Resets in** — relative reset time first, so near-term recovery is easy to scan.
+
+Short and long windows can disagree. For example, a 5h row may last until reset while a weekly row says `↓ conserve`; treat the slower long-window row as the limiting constraint.
 
 Options:
 
@@ -135,7 +151,9 @@ Options:
 | `--show-source`          | Show where each usage row came from.                                     |
 | `--show-copilot-credits` | Include Copilot AI credits when parseable.                               |
 | `--show-remaining-time`  | Show burn-time estimates.                                                |
-| `--hide-remaining-time`  | Hide burn-time estimates.                                                |
+| `--hide-remaining-time`  | Hide burn-time estimates (default).                                      |
+| `--show-daily-budget`    | Show the Guidance column (default).                                      |
+| `--hide-daily-budget`    | Hide the Guidance column.                                                |
 | `--show-codex-spark`     | Show Codex Spark rows.                                                   |
 | `--hide-codex-spark`     | Hide Codex Spark rows.                                                   |
 | `--statusline`           | Read Claude Code statusline JSON from stdin and cache it.                |
@@ -362,6 +380,8 @@ Child scheduler logs are written under each Ralph run’s `scheduler/` subdirect
 * Codex: local JSONL under `~/.codex/sessions`.
 * Claude Code: OAuth usage API/cache, statusline cache, then local project JSONL fallback.
 * GitHub Copilot: local Copilot CLI footer captured through a bounded PTY helper.
+
+The Copilot footer only shows plan/session usage when the `quota` and `ai-used` status-line items are enabled (off by default on a fresh install, normally toggled via `/statusline`). Before each capture, `llm-usage` enables those items in `$COPILOT_HOME/settings.json` (default `~/.copilot/settings.json`), preserving all other settings. Set `LLM_USAGE_COPILOT_NO_SETTINGS_WRITE=1` to skip this.
 
 Copilot capture is cached with `LLM_USAGE_COPILOT_CACHE_TTL`. Default: `300`. Set `LLM_USAGE_COPILOT_CACHE_TTL=0` to force synchronous capture.
 
