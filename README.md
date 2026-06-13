@@ -115,7 +115,7 @@ llm-usage --statusline
 
 By default, it shows all supported providers:
 
-```bash
+```text
 LLM Usage · 13:03
 
 Bars: █ available · ░ spent
