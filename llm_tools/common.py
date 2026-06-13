@@ -1541,32 +1541,146 @@ def output_is_retryable(status: int, output: str, attached: bool = False, trust_
     return bool(PROVIDER_RATE_LIMIT_RE.search(output))
 
 
-def timestamp_prefix(now: float | None = None) -> bytes:
-    """Wall-clock `[HH:MM:SS] ` marker used to stamp streamed provider output."""
-    moment = time.localtime(now if now is not None else time.time())
-    return time.strftime("[%H:%M:%S] ", moment).encode("ascii")
+# Fields that may appear, in any combination and order, inside the `[ ]` marker
+# prepended to each relayed provider line. "time" is the wall-clock HH:MM:SS;
+# "tool" is the provider name (codex/claude/...); "usage" is the remaining
+# percentage per window (e.g. "5h=10% week=30%"). An empty selection disables
+# the marker entirely (no brackets).
+LINE_PREFIX_FIELDS = ("time", "tool", "usage")
+
+# Short labels for the windows shown by the "usage" prefix field.
+USAGE_PREFIX_WINDOW_LABELS = {"weekly": "week", "monthly": "month"}
 
 
-class TimestampPrefixer:
-    """Prefix each line of streamed provider output with a wall-clock time.
+def usage_prefix_text(tool: str, env: dict[str, str] | None = None) -> str:
+    """Remaining-percentage summary for the "usage" prefix field.
 
-    A long autonomous increment can go minutes between visible lines; without a
-    timestamp on every relayed line a watcher cannot tell "thinking" from
-    "wedged". This stamps the STREAMED copy only — the captured transcript that
-    is logged and scanned for rate-limit signatures stays byte-exact. It tracks
-    line-start state across calls so chunked, non-line-aligned output (a PTY that
-    emits half a line at a time) is still stamped exactly once per line.
+    Renders e.g. ``5h=10% week=30%`` for the tool's current windows. Returns an
+    empty string when no window remaining is known. This shells out to the
+    provider usage source, so callers must cache it (see UsagePrefixCache)
+    instead of calling it per line.
+    """
+    snapshot = usage_snapshot_for_tool(tool, env)
+    decision = usage_decision_for_tool(tool, "auto", "1", "60", snapshot, env)
+    windows = decision.get("windows")
+    if not isinstance(windows, list):
+        return ""
+    parts: list[str] = []
+    for window in windows:
+        if not isinstance(window, dict):
+            continue
+        remaining = window.get("remaining")
+        if remaining is None:
+            continue
+        name = str(window.get("name", "?"))
+        label = USAGE_PREFIX_WINDOW_LABELS.get(name, name)
+        parts.append(f"{label}={fmt_pct(remaining)}%")
+    return " ".join(parts)
+
+
+class UsagePrefixCache:
+    """Process-local TTL cache for the per-tool "usage" prefix string.
+
+    Computing the usage field shells out to provider CLIs, far too slow to do per
+    relayed line. This caches the rendered string per tool and recomputes it at
+    most once per ``ttl`` seconds, so the field stays cheap enough to stamp on
+    every line. One module-level instance (USAGE_PREFIX_CACHE) is shared across
+    the stdout/stderr prefixers and successive ralph-robin increments in the same
+    process, so the refresh cadence holds across the whole run.
     """
 
-    def __init__(self, enabled: bool = True, clock: Any | None = None) -> None:
-        self.enabled = enabled
+    def __init__(self, clock: Any | None = None, builder: Any | None = None) -> None:
+        self._clock = clock or time.monotonic
+        self._builder = builder or usage_prefix_text
+        self._cache: dict[str, tuple[float, str]] = {}
+
+    def get(self, tool: str, ttl: float = 15.0) -> str:
+        now = self._clock()
+        hit = self._cache.get(tool)
+        if hit is not None and now - hit[0] < ttl:
+            return hit[1]
+        try:
+            value = self._builder(tool)
+        except Exception:
+            # A transient usage-source failure must not break output relaying:
+            # reuse the last known value (or empty) and try again next interval.
+            value = hit[1] if hit is not None else ""
+        self._cache[tool] = (now, value)
+        return value
+
+
+USAGE_PREFIX_CACHE = UsagePrefixCache()
+
+
+def render_line_prefix(
+    fields: list[str],
+    tool: str = "",
+    now: float | None = None,
+    usage_ttl: float = 15.0,
+    usage_cache: UsagePrefixCache | None = None,
+) -> bytes:
+    """Render the `[...] ` marker prepended to a relayed provider line.
+
+    ``fields`` is an ordered subset of LINE_PREFIX_FIELDS; the order is the order
+    rendered inside the brackets. Returns empty bytes when nothing resolves to
+    content, so a disabled/empty selection emits no marker at all (not even the
+    brackets).
+    """
+    parts: list[str] = []
+    for name in fields:
+        if name == "time":
+            moment = time.localtime(now if now is not None else time.time())
+            parts.append(time.strftime("%H:%M:%S", moment))
+        elif name == "tool" and tool:
+            parts.append(tool)
+        elif name == "usage" and tool:
+            cache = usage_cache if usage_cache is not None else USAGE_PREFIX_CACHE
+            text = cache.get(tool, usage_ttl)
+            if text:
+                parts.append(text)
+    if not parts:
+        return b""
+    return ("[" + " ".join(parts) + "] ").encode("utf-8")
+
+
+class LinePrefixer:
+    """Prefix each line of streamed provider output with a configurable marker.
+
+    A long autonomous increment can go minutes between visible lines; a per-line
+    marker (wall-clock time, the provider name, and/or remaining usage) lets a
+    watcher tell "thinking" from "wedged" and tell which tool in the rotation is
+    talking. This stamps the STREAMED copy only — the captured transcript that is
+    logged and scanned for rate-limit signatures stays byte-exact. It tracks
+    line-start state across calls so chunked, non-line-aligned output (a PTY that
+    emits half a line at a time) is still stamped exactly once per line. An empty
+    ``fields`` disables prefixing entirely.
+    """
+
+    def __init__(
+        self,
+        fields: list[str] | None = None,
+        tool: str = "",
+        clock: Any | None = None,
+        usage_ttl: float = 15.0,
+        usage_cache: UsagePrefixCache | None = None,
+    ) -> None:
+        self.fields = list(fields or [])
+        self.tool = tool
         self.at_line_start = True
         self._clock = clock or time.time
+        self._usage_ttl = usage_ttl
+        self._usage_cache = usage_cache
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.fields)
 
     def apply(self, raw: bytes) -> bytes:
         if not self.enabled or not raw:
             return raw
-        stamp = timestamp_prefix(self._clock())
+        stamp = render_line_prefix(self.fields, self.tool, self._clock(), self._usage_ttl, self._usage_cache)
+        if not stamp:
+            return raw
         out = bytearray()
         i = 0
         n = len(raw)

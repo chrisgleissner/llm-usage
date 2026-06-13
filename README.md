@@ -255,13 +255,18 @@ ralph-robin --prompt-file /home/chris/dev/ralph.prompt.md
 [16:22:47] ◆ ralph-robin: · logs: /home/chris/.cache/llm-tools/ralph-robin/logs/20260613-162247-ralph-robin-r67_na63
 [16:22:47] ◆ ralph-robin: · usage claude: usable (5h 22% left, weekly 85% left) | codex: usable (5h 99% left, weekly 35% left)
 [16:22:47] ◆ ralph-robin: ✓ selected claude (even-burn)
-[16:22:52] I'll begin the RALPH loop iteration following FAST-PATH STARTUP. Let me start by establishing current state.
-[16:22:54] Tool call: Bash
-[16:22:54] {
-[16:22:54]   "command": "git status && echo \"---LATEST COMMIT---\" && git log --oneline -5 && echo \"---BRANCH---\" && git branch --show-current",
-[16:22:54]   "description": "Check git status, branch, and recent commits"
-[16:22:54] }
+[16:22:52 claude] I'll begin the RALPH loop iteration following FAST-PATH STARTUP. Let me start by establishing current state.
+[16:22:54 claude] Tool call: Bash
+[16:22:54 claude] {
+[16:22:54 claude]   "command": "git status && echo \"---LATEST COMMIT---\" && git log --oneline -5 && echo \"---BRANCH---\" && git branch --show-current",
+[16:22:54 claude]   "description": "Check git status, branch, and recent commits"
+[16:22:54 claude] }
 ```
+
+Each relayed provider line is prefixed with `[time tool]` by default so a quiet
+increment is distinguishable from a wedged one and the active provider is always
+clear. Customize the prefix with `--prefix` (e.g. `--prefix time,tool,usage` to
+also show remaining quota, `--prefix none` to turn it off entirely).
 
 Options:
 
@@ -274,6 +279,8 @@ Options:
 | `--no-even-burn`     | Keep using the current provider until it is exhausted.                                                      |
 | `--max-iterations N` | Stop after `N` successful increments. Default `0` means no iteration cap; use `1` for single-shot. |
 | `--max-duration D`   | Stop once `D` of wall-clock time elapses (e.g. `24h`, `90m`, `30s`, or seconds). Default `24h`; `0` disables. Whichever of `--max-iterations`/`--max-duration` is hit first wins. |
+| `--prefix LIST`      | Comma-separated fields stamped on each relayed provider line, rendered inside `[ ]` in order. Fields: `time` (`HH:MM:SS`), `tool` (provider name), `usage` (remaining per window, e.g. `5h=10% week=30%`). Default `time,tool`; use `none` (or empty) to turn it off entirely. |
+| `--prefix-usage-interval S` | Refresh interval (seconds) for the cached `usage` prefix field. Default `15`; `0` refreshes every line. |
 | `--state-file FILE`  | Store current provider index. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json`. |
 | `--log-dir DIR`      | Set Ralph log directory. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.            |
 

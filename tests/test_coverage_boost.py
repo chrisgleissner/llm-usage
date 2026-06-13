@@ -96,6 +96,78 @@ def test_claude_stream_renderer_render_line() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# common: configurable line prefix
+# --------------------------------------------------------------------------- #
+
+
+def test_render_line_prefix_fields_and_order() -> None:
+    # time field renders HH:MM:SS; combine with tool in the configured order.
+    assert common.render_line_prefix(["time"], "codex", now=0).startswith(b"[")
+    assert common.render_line_prefix(["tool"], "codex") == b"[codex] "
+    assert common.render_line_prefix(["tool", "time"], "codex", now=0).endswith(b"] ")
+    # An empty selection emits no marker at all (not even brackets).
+    assert common.render_line_prefix([], "codex") == b""
+    # The "tool"/"usage" fields drop out when no tool is known.
+    assert common.render_line_prefix(["tool"], "") == b""
+
+
+def test_render_line_prefix_usage_field_uses_cache() -> None:
+    cache = common.UsagePrefixCache(clock=lambda: 0.0, builder=lambda tool: "5h=10% week=30%")
+    out = common.render_line_prefix(["tool", "usage"], "codex", usage_cache=cache)
+    assert out == b"[codex 5h=10% week=30%] "
+
+
+def test_usage_prefix_cache_ttl_and_fallback() -> None:
+    calls: list[str] = []
+    now = {"t": 0.0}
+
+    def builder(tool: str) -> str:
+        calls.append(tool)
+        return f"v{len(calls)}"
+
+    cache = common.UsagePrefixCache(clock=lambda: now["t"], builder=builder)
+    assert cache.get("codex", ttl=15.0) == "v1"
+    # Within the TTL the cached value is reused (no second build).
+    now["t"] = 10.0
+    assert cache.get("codex", ttl=15.0) == "v1"
+    assert calls == ["codex"]
+    # Past the TTL it refreshes.
+    now["t"] = 20.0
+    assert cache.get("codex", ttl=15.0) == "v2"
+    assert calls == ["codex", "codex"]
+
+    # A builder failure reuses the last known value instead of breaking output.
+    def boom(tool: str) -> str:
+        raise RuntimeError("usage source down")
+
+    failing = common.UsagePrefixCache(clock=lambda: now["t"], builder=boom)
+    now["t"] = 100.0
+    assert failing.get("codex", ttl=15.0) == ""  # no prior value -> empty
+
+
+def test_line_prefixer_chunked_lines_stamped_once() -> None:
+    prefixer = common.LinePrefixer(["tool"], "codex")
+    # Half a line, then the rest: the marker appears once at the true line start.
+    assert prefixer.apply(b"hel") == b"[codex] hel"
+    assert prefixer.apply(b"lo\nworld\n") == b"lo\n[codex] world\n"
+    # Disabled prefixer is a byte-exact passthrough.
+    off = common.LinePrefixer([], "codex")
+    assert off.apply(b"raw\n") == b"raw\n"
+
+
+def test_parse_prefix_fields() -> None:
+    assert ralph_robin.parse_prefix_fields("time,tool") == ["time", "tool"]
+    assert ralph_robin.parse_prefix_fields("tool,time") == ["tool", "time"]
+    # De-duplicated, whitespace tolerant.
+    assert ralph_robin.parse_prefix_fields(" time , time ,tool") == ["time", "tool"]
+    # "none"/"off"/empty disable entirely.
+    assert ralph_robin.parse_prefix_fields("none") == []
+    assert ralph_robin.parse_prefix_fields("") == []
+    with pytest.raises(SystemExit):
+        ralph_robin.parse_prefix_fields("time,bogus")
+
+
+# --------------------------------------------------------------------------- #
 # scheduler: progress guard + small helpers
 # --------------------------------------------------------------------------- #
 

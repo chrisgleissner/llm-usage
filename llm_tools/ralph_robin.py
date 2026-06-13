@@ -85,6 +85,17 @@ Options:
                               provider that exits instantly cannot spin, and
                               aborts if it keeps returning instant successes
                               without doing real work.
+  --prefix LIST               Comma-separated fields to stamp on each relayed
+                              provider line, rendered inside [ ] in the given
+                              order (default: time,tool -> "[19:13:39 codex] ").
+                              Fields: time (HH:MM:SS), tool (provider name),
+                              usage (remaining per window, e.g.
+                              "5h=10% week=30%"). Use "none" (or an empty value)
+                              to turn the prefix off entirely, brackets included.
+  --prefix-usage-interval SECONDS
+                              Refresh interval for the cached "usage" prefix
+                              field (default: 15; 0 refreshes every line). Only
+                              relevant when "usage" is in --prefix.
   --cwd DIR                   Working directory for the target CLI (default: current directory).
   --fresh                     Launch a fresh CLI process through llm-scheduler (default).
   --headless                  Always use the non-interactive provider command
@@ -135,6 +146,9 @@ class RalphConfig:
     max_iterations: str = "0"
     max_duration: str = "24h"
     min_iteration_seconds: str = "5"
+    prefix_spec: str = "time,tool"
+    prefix_fields: list[str] = field(default_factory=list)
+    prefix_usage_interval: str = "15"
 
 
 def trim(value: str) -> str:
@@ -274,6 +288,32 @@ def parse_tools(raw: str) -> list[str]:
     return tools
 
 
+# Tokens that disable the per-line prefix entirely (no fields, no brackets).
+PREFIX_OFF_TOKENS = {"none", "off"}
+
+
+def parse_prefix_fields(raw: str) -> list[str]:
+    """Parse the --prefix value into an ordered list of prefix fields.
+
+    Accepts a comma-separated combination of common.LINE_PREFIX_FIELDS, in any
+    order, de-duplicated while preserving first occurrence. An empty value or a
+    "none"/"off" token turns the prefix off entirely.
+    """
+    fields: list[str] = []
+    for part in raw.split(","):
+        token = trim(part).lower()
+        if not token:
+            continue
+        if token in PREFIX_OFF_TOKENS:
+            return []
+        if token not in common.LINE_PREFIX_FIELDS:
+            common.err(f"invalid field in --prefix: {token} (choose from {', '.join(common.LINE_PREFIX_FIELDS)}, or none)")
+            raise SystemExit(2)
+        if token not in fields:
+            fields.append(token)
+    return fields
+
+
 def parse_args(argv: list[str]) -> RalphConfig:
     cfg = RalphConfig()
     i = 0
@@ -321,6 +361,10 @@ def parse_args(argv: list[str]) -> RalphConfig:
             cfg.max_duration = need_value("--max-duration requires a duration")
         elif arg == "--min-iteration-seconds":
             cfg.min_iteration_seconds = need_value("--min-iteration-seconds requires seconds")
+        elif arg == "--prefix":
+            cfg.prefix_spec = need_value("--prefix requires a value")
+        elif arg == "--prefix-usage-interval":
+            cfg.prefix_usage_interval = need_value("--prefix-usage-interval requires seconds")
         elif arg == "--cwd":
             cfg.cwd = need_value("--cwd requires a directory")
         elif arg == "--fresh":
@@ -384,6 +428,10 @@ def validate_args(cfg: RalphConfig) -> None:
     if not common.is_integer(cfg.min_iteration_seconds) or int(cfg.min_iteration_seconds) < 0:
         common.err("--min-iteration-seconds must be a non-negative integer")
         raise SystemExit(2)
+    cfg.prefix_fields = parse_prefix_fields(cfg.prefix_spec)
+    if not common.is_integer(cfg.prefix_usage_interval) or int(cfg.prefix_usage_interval) < 0:
+        common.err("--prefix-usage-interval must be a non-negative integer")
+        raise SystemExit(2)
     if not common.is_integer(os.environ.get("LLM_SCHEDULER_IDLE_TIMEOUT", "600")):
         common.err("LLM_SCHEDULER_IDLE_TIMEOUT must be integer seconds")
         raise SystemExit(2)
@@ -418,6 +466,8 @@ def safe_args_json(cfg: RalphConfig) -> dict[str, Any]:
         "max_iterations": int(cfg.max_iterations),
         "max_duration_seconds": parse_duration(cfg.max_duration) or 0,
         "min_iteration_seconds": int(cfg.min_iteration_seconds),
+        "prefix_fields": list(cfg.prefix_fields),
+        "prefix_usage_interval": int(cfg.prefix_usage_interval),
     }
 
 
@@ -635,10 +685,13 @@ def scheduler_config_for(cfg: RalphConfig, selected_tool: str, logs: common.RunL
         claude_stream_json=selected_tool == "claude" and not cfg.command_template,
         ralph_robin_active=True,
         ralph_robin_tools=",".join(cfg.tools),
-        # Stamp every relayed provider line with a wall-clock time so a long,
-        # quiet increment is visibly distinguishable from a wedged one. Opt out
-        # with LLM_TOOLS_RALPH_NO_TIMESTAMPS=1 (e.g. for byte-exact piping).
-        timestamp_output=os.environ.get("LLM_TOOLS_RALPH_NO_TIMESTAMPS", "0") != "1",
+        # Stamp every relayed provider line with the configured marker (default
+        # time + tool name) so a long, quiet increment is visibly distinguishable
+        # from a wedged one and the active provider is always clear. See --prefix.
+        # LLM_TOOLS_RALPH_NO_TIMESTAMPS=1 forces the marker off entirely (e.g. for
+        # byte-exact piping), regardless of --prefix.
+        output_prefix_fields=[] if os.environ.get("LLM_TOOLS_RALPH_NO_TIMESTAMPS", "0") == "1" else list(cfg.prefix_fields),
+        output_prefix_usage_ttl=float(int(cfg.prefix_usage_interval)),
     )
 
 
