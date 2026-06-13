@@ -112,7 +112,11 @@ class SchedulerConfig:
     claude_stream_json: bool = False
     ralph_robin_active: bool = False
     ralph_robin_tools: str = ""
-    timestamp_output: bool = False
+    # Ordered fields stamped on each relayed provider line (see
+    # common.LINE_PREFIX_FIELDS). Empty disables the marker entirely.
+    output_prefix_fields: list[str] = field(default_factory=list)
+    # Seconds between refreshes of the "usage" prefix field (cached in between).
+    output_prefix_usage_ttl: float = 15.0
 
 
 def parse_args(argv: list[str]) -> SchedulerConfig:
@@ -292,6 +296,8 @@ def safe_args_json(cfg: SchedulerConfig) -> dict[str, Any]:
         "claude_stream_json": cfg.claude_stream_json,
         "ralph_robin_active": cfg.ralph_robin_active,
         "ralph_robin_tools": cfg.ralph_robin_tools,
+        "output_prefix_fields": list(cfg.output_prefix_fields),
+        "output_prefix_usage_ttl": cfg.output_prefix_usage_ttl,
     }
 
 
@@ -777,8 +783,8 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
     open_fds = {stdout_fd: "stdout", stderr_fd: "stderr"}
     stdout_color = stream_color_enabled(sys.stdout)
     stderr_color = stream_color_enabled(sys.stderr)
-    stdout_ts = common.TimestampPrefixer(cfg.timestamp_output)
-    stderr_ts = common.TimestampPrefixer(cfg.timestamp_output)
+    stdout_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.tool, usage_ttl=cfg.output_prefix_usage_ttl)
+    stderr_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.tool, usage_ttl=cfg.output_prefix_usage_ttl)
     renderer = ClaudeStreamRenderer()
     stdout_buffer = b""
     combined_parts: list[bytes] = []
@@ -898,8 +904,8 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     open_fds = {stdout_fd: "stdout", stderr_fd: "stderr"}
     stdout_color = stream_color_enabled(sys.stdout)
     stderr_color = stream_color_enabled(sys.stderr)
-    stdout_ts = common.TimestampPrefixer(cfg.timestamp_output)
-    stderr_ts = common.TimestampPrefixer(cfg.timestamp_output)
+    stdout_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.tool, usage_ttl=cfg.output_prefix_usage_ttl)
+    stderr_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.tool, usage_ttl=cfg.output_prefix_usage_ttl)
     stdout_parts: list[bytes] = []
     combined_parts: list[bytes] = []
     start = time.time()

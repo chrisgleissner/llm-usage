@@ -310,10 +310,10 @@ for event in events:
 
 
 def test_ralph_robin_timestamps_each_relayed_line(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:
-    # With timestamping on (the default under ralph-robin), every relayed
-    # provider line is prefixed with a [HH:MM:SS] marker so a watcher can tell a
-    # slow increment from a wedged one. The two relayed lines must each carry
-    # their own stamp.
+    # With the default prefix (time,tool) every relayed provider line is stamped
+    # with a [HH:MM:SS tool] marker so a watcher can tell a slow increment from a
+    # wedged one and see which provider is talking. The two relayed lines must
+    # each carry their own stamp.
     renv = env.copy()
     renv.update(
         {
@@ -332,11 +332,71 @@ def test_ralph_robin_timestamps_each_relayed_line(env: dict[str, str], fake_prov
         renv,
     )
     assert result.returncode == 0, result.stderr.decode()
-    stamped = re.findall(rb"^\[\d\d:\d\d:\d\d\] (line one|line two)$", result.stdout, re.M)
+    stamped = re.findall(rb"^\[\d\d:\d\d:\d\d claude\] (line one|line two)$", result.stdout, re.M)
     assert stamped == [b"line one", b"line two"], result.stdout
-    # The saved transcript stays byte-exact (no timestamps leak into logs/scans).
+    # The saved transcript stays byte-exact (no prefix leaks into logs/scans).
     out_file = next((tmp_path / "ts-logs").rglob("attempt-1.out"))
     assert out_file.read_bytes() == b"line one\nline two\n"
+
+
+def test_ralph_robin_prefix_can_be_disabled(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:
+    # --prefix none turns the marker off entirely (no brackets), so relayed
+    # output is byte-exact again.
+    renv = env.copy()
+    renv.update(
+        {
+            "LLM_SCHEDULER_USAGE_JSON": '{"claude":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}}',
+            "PROVIDER_MODE": "multiline",
+        }
+    )
+    result = run_cmd_bytes(
+        [
+            "./ralph-robin", "--prompt", "rr",
+            "--command-template", "provider-mock {tool} {prompt}",
+            "--state-file", str(tmp_path / "off.json"),
+            "--log-dir", str(tmp_path / "off-logs"),
+            "--no-retry", "--max-iterations", "1",
+            "--prefix", "none",
+        ],
+        renv,
+    )
+    assert result.returncode == 0, result.stderr.decode()
+    assert result.stdout == b"line one\nline two\n"
+
+
+def test_ralph_robin_prefix_usage_field(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:
+    # --prefix time,tool,usage adds remaining percentages per window, e.g.
+    # "[19:13:39 claude 5h=90% week=75%] line one".
+    renv = env.copy()
+    renv.update(
+        {
+            "LLM_SCHEDULER_USAGE_JSON": '{"claude":{"available":true,"five_hour":{"remaining":90},"week":{"remaining":75}},"codex":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}}',
+            "PROVIDER_MODE": "multiline",
+        }
+    )
+    result = run_cmd_bytes(
+        [
+            "./ralph-robin", "--prompt", "rr",
+            "--command-template", "provider-mock {tool} {prompt}",
+            "--state-file", str(tmp_path / "usage.json"),
+            "--log-dir", str(tmp_path / "usage-logs"),
+            "--no-retry", "--max-iterations", "1",
+            "--prefix", "time,tool,usage",
+        ],
+        renv,
+    )
+    assert result.returncode == 0, result.stderr.decode()
+    stamped = re.findall(rb"^\[\d\d:\d\d:\d\d claude 5h=90% week=75%\] (line one|line two)$", result.stdout, re.M)
+    assert stamped == [b"line one", b"line two"], result.stdout
+
+
+def test_ralph_robin_invalid_prefix_field(env: dict[str, str], tmp_path: Path) -> None:
+    result = run_cmd(
+        ["./ralph-robin", "--prompt", "rr", "--prefix", "time,bogus"],
+        env,
+    )
+    assert result.returncode == 2
+    assert "invalid field in --prefix" in result.stderr
 
 
 def test_claude_stream_result_fallback_after_tool_only_event() -> None:
