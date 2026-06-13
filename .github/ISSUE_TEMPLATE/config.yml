@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contributions via pull request
+    url: https://github.com/chrisgleissner/llm-tools/compare
+    about: Thanks for helping. Please open a small PR with tests and keep total coverage at or above 85%.

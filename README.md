@@ -441,6 +441,19 @@ Tests use fixtures and mock commands. They do not require real Codex, Claude, Co
 
 For manual end-to-end checks, run the examples above against installed providers without the test fixture environment.
 
+## Contributing
+
+Thanks for considering a contribution. Small, mergeable pull requests are always appreciated.
+
+If you send a PR, please make sure total coverage is at or above `85%`:
+
+```bash
+python -m pytest -q
+coverage run -m pytest
+coverage combine
+coverage report --fail-under=85
+```
+
 ## License
 
 Apache License 2.0.
