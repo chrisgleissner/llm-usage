@@ -89,7 +89,7 @@ Or run the tools straight from a checkout without installing:
 ## Quick Start
 
 ```bash
-llm-usage
+llm-usage --watch 60
 llm-scheduler --tool codex --prompt-file task.md
 ralph-robin --prompt-file task.md
 ```
