@@ -5,9 +5,9 @@
 [![Build](https://github.com/chrisgleissner/llm-tools/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/chrisgleissner/llm-tools/actions/workflows/test.yml)
 [![codecov](https://codecov.io/gh/chrisgleissner/llm-tools/graph/badge.svg)](https://codecov.io/gh/chrisgleissner/llm-tools)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![Platform](https://img.shields.io/badge/platform-Linux-blue)](https://github.com/chrisgleissner/llm-tools/releases)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue)](https://github.com/chrisgleissner/llm-tools/releases)
 
-Small Linux command-line tools for keeping local LLM CLIs productive, observable, and usable across rate-limit windows.
+Small command-line tools for keeping local LLM CLIs productive, observable, and usable across rate-limit windows. They run on Linux and macOS; the wake/suspend features are Linux-only (see [Requirements](#requirements)).
 
 ## What Each Tool Is For
 
@@ -39,16 +39,30 @@ None of the tools call a hard "command not found" guard on a provider binary, so
 
 ## Install
 
+Install with [pipx](https://pipx.pypa.io) so the commands land on your `PATH` and can be run from any directory:
+
 ```bash
-python -m pip install .
+pipx install .
+```
+
+`pipx` keeps each tool in its own virtual environment, so this also works on externally managed systems (Debian/Ubuntu, Homebrew Python) where installing into the system interpreter is blocked with an `externally-managed-environment` error. If you do not have `pipx` yet: `python3 -m pip install --user pipx && python3 -m pipx ensurepath` (or `brew install pipx` on macOS), then open a new shell.
+
+Verify the commands are on your `PATH`:
+
+```bash
 command -v llm-usage
 command -v llm-scheduler
 command -v ralph-robin
 ```
 
-For an isolated install, use a virtual environment or `pipx install .` from the repository checkout.
+Alternatively, install into a virtual environment:
 
-You can also run the tools directly from the checkout:
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+python -m pip install .
+```
+
+Or run the tools straight from a checkout without installing:
 
 ```bash
 ./llm-usage
@@ -361,6 +375,7 @@ llm-scheduler --wake-test
 
 ## Requirements
 
+* Linux or macOS. The wake and suspend features (`--wake`, `--suspend-until-ready`) need Linux with systemd; everything else works on both.
 * Python 3.11 or newer.
 * Optional: `copilot` or `github-copilot` for Copilot usage capture.
 * Optional: `tmux` for tmux mode.
