@@ -92,7 +92,6 @@ Or run the tools straight from a checkout without installing:
 llm-usage
 llm-scheduler --tool codex --prompt-file task.md
 ralph-robin --prompt-file task.md
-llm-scheduler --tool claude --window 5h --prompt-file task.md --suspend-until-ready
 ```
 
 Follow the latest scheduler run:
