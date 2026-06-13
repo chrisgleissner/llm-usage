@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -220,6 +221,9 @@ def ralph_stdout(env: dict[str, str], mode: str, tmp_path: Path) -> subprocess.C
         {
             "LLM_SCHEDULER_USAGE_JSON": '{"claude":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}}',
             "PROVIDER_MODE": mode,
+            # Keep this a byte-exact passthrough check; timestamp prefixing is
+            # covered by test_ralph_robin_timestamps_each_relayed_line.
+            "LLM_TOOLS_RALPH_NO_TIMESTAMPS": "1",
         }
     )
     return run_cmd_bytes(
@@ -292,6 +296,8 @@ for event in events:
         env
         | {
             "LLM_SCHEDULER_USAGE_JSON": '{"claude":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}}',
+            # Pure passthrough check; timestamps covered separately.
+            "LLM_TOOLS_RALPH_NO_TIMESTAMPS": "1",
         },
     )
     assert result.returncode == 0, result.stderr.decode()
@@ -303,6 +309,36 @@ for event in events:
     assert b'"type":"assistant"' not in result.stdout
 
 
+def test_ralph_robin_timestamps_each_relayed_line(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:
+    # With timestamping on (the default under ralph-robin), every relayed
+    # provider line is prefixed with a [HH:MM:SS] marker so a watcher can tell a
+    # slow increment from a wedged one. The two relayed lines must each carry
+    # their own stamp.
+    renv = env.copy()
+    renv.update(
+        {
+            "LLM_SCHEDULER_USAGE_JSON": '{"claude":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}}',
+            "PROVIDER_MODE": "multiline",
+        }
+    )
+    result = run_cmd_bytes(
+        [
+            "./ralph-robin", "--prompt", "rr",
+            "--command-template", "provider-mock {tool} {prompt}",
+            "--state-file", str(tmp_path / "ts.json"),
+            "--log-dir", str(tmp_path / "ts-logs"),
+            "--no-retry", "--max-iterations", "1",
+        ],
+        renv,
+    )
+    assert result.returncode == 0, result.stderr.decode()
+    stamped = re.findall(rb"^\[\d\d:\d\d:\d\d\] (line one|line two)$", result.stdout, re.M)
+    assert stamped == [b"line one", b"line two"], result.stdout
+    # The saved transcript stays byte-exact (no timestamps leak into logs/scans).
+    out_file = next((tmp_path / "ts-logs").rglob("attempt-1.out"))
+    assert out_file.read_bytes() == b"line one\nline two\n"
+
+
 def test_claude_stream_result_fallback_after_tool_only_event() -> None:
     renderer = scheduler.ClaudeStreamRenderer()
     tool_event = b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"true"}}]}}\n'
@@ -312,9 +348,35 @@ def test_claude_stream_result_fallback_after_tool_only_event() -> None:
 
 
 def test_ralph_robin_partial_stdout_on_provider_failure(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:
-    result = ralph_stdout(env, "partial_fail", tmp_path)
+    # A hard provider failure no longer kills the persistent loop on the first
+    # hit: ralph-robin rotates and retries, still relays the partial provider
+    # stdout, and only aborts once a sustained failure streak proves the setup is
+    # broken (so a single transient crash cannot end an overnight run).
+    renv = env.copy()
+    renv.update(
+        {
+            "LLM_SCHEDULER_USAGE_JSON": '{"claude":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}}',
+            "PROVIDER_MODE": "partial_fail",
+        }
+    )
+    result = run_cmd_bytes(
+        [
+            "./ralph-robin", "--prompt", "rr",
+            "--tools", "claude",
+            "--command-template", "provider-mock {tool} {prompt}",
+            "--state-file", str(tmp_path / "pf.json"),
+            "--log-dir", str(tmp_path / "pf-logs"),
+            "--no-retry", "--poll-interval", "1", "--max-duration", "120",
+        ],
+        renv,
+    )
     assert result.returncode == 1
-    assert result.stdout == b"partial"
+    assert b"partial" in result.stdout
+    assert b"failures in a row" in result.stderr
+    run_dirs = [p for p in (tmp_path / "pf-logs").iterdir() if p.is_dir() and not p.is_symlink()]
+    events = (run_dirs[0] / "events.jsonl").read_text()
+    assert '"type":"provider_failed"' in events
+    assert '"reason":"hard-fail-streak"' in events
 
 
 def test_common_normalization_usage_decisions_and_time(env: dict[str, str]) -> None:

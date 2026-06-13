@@ -20,6 +20,11 @@ APP_NAME = "ralph-robin"
 # orchestrator stops rather than spin or burn quota forever.
 FAST_SUCCESS_ABORT_STREAK = 5
 
+# A hard provider failure (non-zero, non-abort exit) rotates to the next provider
+# instead of killing the persistent loop. Only a sustained streak with no
+# successful increment in between — a permanently broken setup — is fatal.
+HARD_FAIL_ABORT_STREAK = 6
+
 
 USAGE = """Usage: ralph-robin (--prompt TEXT | --prompt-file FILE) [options]
 
@@ -181,10 +186,11 @@ def style(text: str, role: str) -> str:
 
 def status_line(message: str, *, level: str = "info") -> None:
     role = level if level in common.ANSI_COLOR_ROLES else "info"
+    stamp = time.strftime("[%H:%M:%S] ")
     prefix = style(f"{common.symbol_prefix('brand')}ralph-robin", "brand")
     marker = common.symbol_prefix(role).rstrip()
     marker_text = f"{style(marker, role)} " if marker else ""
-    print(f"{prefix}: {marker_text}{message}", file=sys.stderr)
+    print(f"{style(stamp, 'dim')}{prefix}: {marker_text}{message}", file=sys.stderr)
 
 
 def decision_summary(decision: dict[str, Any]) -> str:
@@ -625,6 +631,10 @@ def scheduler_config_for(cfg: RalphConfig, selected_tool: str, logs: common.RunL
         claude_stream_json=selected_tool == "claude" and not cfg.command_template,
         ralph_robin_active=True,
         ralph_robin_tools=",".join(cfg.tools),
+        # Stamp every relayed provider line with a wall-clock time so a long,
+        # quiet increment is visibly distinguishable from a wedged one. Opt out
+        # with LLM_TOOLS_RALPH_NO_TIMESTAMPS=1 (e.g. for byte-exact piping).
+        timestamp_output=os.environ.get("LLM_TOOLS_RALPH_NO_TIMESTAMPS", "0") != "1",
     )
 
 
@@ -819,6 +829,7 @@ def main(argv: list[str] | None = None) -> int:
     start_monotonic = monotonic()
     completed = 0
     fast_streak = 0
+    hard_fail_streak = 0
     iteration = 0
 
     def out_of_time() -> bool:
@@ -882,6 +893,7 @@ def main(argv: list[str] | None = None) -> int:
         common.log_event(logs, "scheduler_result", {"status": status, "seconds": round(iter_seconds, 3)})
         if status == 0:
             completed += 1
+            hard_fail_streak = 0
             common.log_event(logs, "iteration_complete", {"tool": selected_tool, "index": selected_index, "completed": completed, "seconds": round(iter_seconds, 3)})
             if max_iterations and completed >= max_iterations:
                 common.log_event(logs, "final", {"status": "success", "completed": completed})
@@ -921,8 +933,28 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             current_index = (selected_index + 1) % len(cfg.tools)
             continue
-        common.log_event(logs, "final", {"status": "failed", "exit_code": status})
-        return status
+        # A non-zero, non-abort exit is a hard provider failure (crash, broken
+        # CLI, exhausted submission retries). For a persistent loop this must not
+        # terminate the whole run: rotate to the next provider exactly like an
+        # autonomy abort. Only a sustained failure streak with no successful
+        # increment in between — a permanently broken setup — is fatal.
+        hard_fail_streak += 1
+        common.log_text(logs, f"scheduler hard failure for provider={selected_tool} exit={status} streak={hard_fail_streak}; re-evaluating rotation")
+        common.log_event(logs, "provider_failed", {"tool": selected_tool, "index": selected_index, "exit_code": status, "streak": hard_fail_streak})
+        status_line(f"{selected_tool} failed (exit {status}); re-evaluating rotation", level="error")
+        if hard_fail_streak >= HARD_FAIL_ABORT_STREAK:
+            common.log_event(logs, "final", {"status": "failed", "exit_code": status, "reason": "hard-fail-streak", "streak": hard_fail_streak})
+            status_line(f"{hard_fail_streak} provider failures in a row with no progress; stopping", level="error")
+            return status
+        skipped.add(selected_tool)
+        if len(skipped) >= len(cfg.tools):
+            # Every provider hard-failed this pass. Do not stop: wait and retry.
+            if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-failed"):
+                return stop_timed_out()
+            skipped = set()
+            continue
+        current_index = (selected_index + 1) % len(cfg.tools)
+        continue
 
 
 if __name__ == "__main__":

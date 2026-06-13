@@ -112,6 +112,7 @@ class SchedulerConfig:
     claude_stream_json: bool = False
     ralph_robin_active: bool = False
     ralph_robin_tools: str = ""
+    timestamp_output: bool = False
 
 
 def parse_args(argv: list[str]) -> SchedulerConfig:
@@ -776,6 +777,8 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
     open_fds = {stdout_fd: "stdout", stderr_fd: "stderr"}
     stdout_color = stream_color_enabled(sys.stdout)
     stderr_color = stream_color_enabled(sys.stderr)
+    stdout_ts = common.TimestampPrefixer(cfg.timestamp_output)
+    stderr_ts = common.TimestampPrefixer(cfg.timestamp_output)
     renderer = ClaudeStreamRenderer()
     stdout_buffer = b""
     combined_parts: list[bytes] = []
@@ -810,7 +813,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                     if rendered:
                         combined_parts.append(rendered)
                         try:
-                            sys.stdout.buffer.write(highlight_provider_text(rendered, stream_name="stdout", enabled=stdout_color))
+                            sys.stdout.buffer.write(stdout_ts.apply(highlight_provider_text(rendered, stream_name="stdout", enabled=stdout_color)))
                             sys.stdout.buffer.flush()
                         except OSError:
                             pass
@@ -833,7 +836,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                         continue
                     combined_parts.append(rendered)
                     try:
-                        sys.stdout.buffer.write(highlight_provider_text(rendered, stream_name="stdout", enabled=stdout_color))
+                        sys.stdout.buffer.write(stdout_ts.apply(highlight_provider_text(rendered, stream_name="stdout", enabled=stdout_color)))
                         sys.stdout.buffer.flush()
                     except OSError:
                         pass
@@ -843,7 +846,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
             else:
                 combined_parts.append(chunk)
                 try:
-                    sys.stderr.buffer.write(highlight_provider_text(chunk, stream_name="stderr", enabled=stderr_color))
+                    sys.stderr.buffer.write(stderr_ts.apply(highlight_provider_text(chunk, stream_name="stderr", enabled=stderr_color)))
                     sys.stderr.buffer.flush()
                 except OSError:
                     pass
@@ -874,7 +877,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
         abort_line = f"\nllm-scheduler: autonomous abort: {abort_reason}\n".encode()
         combined_parts.append(abort_line)
         try:
-            sys.stderr.buffer.write(highlight_provider_text(abort_line, stream_name="stderr", enabled=stderr_color))
+            sys.stderr.buffer.write(stderr_ts.apply(highlight_provider_text(abort_line, stream_name="stderr", enabled=stderr_color)))
             sys.stderr.buffer.flush()
         except OSError:
             pass
@@ -895,6 +898,8 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     open_fds = {stdout_fd: "stdout", stderr_fd: "stderr"}
     stdout_color = stream_color_enabled(sys.stdout)
     stderr_color = stream_color_enabled(sys.stderr)
+    stdout_ts = common.TimestampPrefixer(cfg.timestamp_output)
+    stderr_ts = common.TimestampPrefixer(cfg.timestamp_output)
     stdout_parts: list[bytes] = []
     combined_parts: list[bytes] = []
     start = time.time()
@@ -924,13 +929,13 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
             if open_fds.get(fd) == "stdout":
                 stdout_parts.append(chunk)
                 try:
-                    sys.stdout.buffer.write(highlight_provider_text(chunk, stream_name="stdout", enabled=stdout_color))
+                    sys.stdout.buffer.write(stdout_ts.apply(highlight_provider_text(chunk, stream_name="stdout", enabled=stdout_color)))
                     sys.stdout.buffer.flush()
                 except OSError:
                     pass
             else:
                 try:
-                    sys.stderr.buffer.write(highlight_provider_text(chunk, stream_name="stderr", enabled=stderr_color))
+                    sys.stderr.buffer.write(stderr_ts.apply(highlight_provider_text(chunk, stream_name="stderr", enabled=stderr_color)))
                     sys.stderr.buffer.flush()
                 except OSError:
                     pass
@@ -1049,7 +1054,7 @@ def submit_once(cfg: SchedulerConfig, logs: common.RunLogs, attempt: int, argv: 
     if status == common.AUTONOMY_ABORT_STATUS:
         common.log_event(logs, "autonomy_abort", {"attempt": attempt, "output": output})
         return common.AUTONOMY_ABORT_STATUS
-    return 1 if common.output_is_retryable(status, output, cfg.attached) else 0
+    return 1 if common.output_is_retryable(status, output, cfg.attached, trust_clean_exit=cfg.ralph_robin_active) else 0
 
 
 def main(argv: list[str] | None = None) -> int:
