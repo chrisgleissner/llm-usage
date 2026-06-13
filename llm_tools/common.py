@@ -1505,18 +1505,83 @@ def clean_capture_file(path: Path) -> None:
         path.write_text(strip_ansi(path.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
 
 
-def output_is_retryable(status: int, output: str, attached: bool = False) -> bool:
+# Provider/transport rate-limit signatures. These must be specific enough that a
+# model's own prose never trips them: an autonomous prompt that talks about a
+# device being "overloaded", a service being "temporarily unavailable", or
+# advising to "try again later" is describing the SYSTEM UNDER TEST, not the LLM
+# provider. Matching those bare words misread a successful provider hand-off as a
+# failed submission and re-ran or killed the orchestration loop. Each branch here
+# is anchored to a genuine API/HTTP/CLI rate-limit shape.
+PROVIDER_RATE_LIMIT_RE = re.compile(
+    r"rate[ _-]?limit(?:ed)? (?:exceeded|reached|hit|error)"
+    r"|rate_limit_error"
+    r"|too many requests"
+    r"|http[ /?]429|status[ :]?429|429 too many requests"
+    r"|quota (?:exceeded|reached)"
+    r"|usage limit (?:exceeded|reached)"
+    r"|overloaded_error|\"overloaded\"|api error:? ?overloaded"
+    r"|http 503|503 service unavailable|service unavailable \(503\)",
+    re.I,
+)
+
+
+def output_is_retryable(status: int, output: str, attached: bool = False, trust_clean_exit: bool = False) -> bool:
     if attached:
         return status not in (0, 130, 143)
     if status != 0:
         return True
-    return bool(
-        re.search(
-            r"rate[ _-]?limit (exceeded|reached|hit)|too many requests|http[ /?]429|status 429|429 too many requests|quota (exceeded|reached)|usage limit (exceeded|reached)|overloaded|service unavailable|temporarily unavailable|try again later",
-            output,
-            re.I,
-        )
-    )
+    # Under an orchestrator that owns rate-limit handling (ralph-robin gates on
+    # usage data and rotates/suspends between increments), a clean provider exit
+    # is a completed increment and must be trusted. Scanning the model's own
+    # output for rate-limit-ish words then double-counts the SYSTEM UNDER TEST's
+    # prose (e.g. "the device was overloaded") as a provider failure, which is
+    # what previously re-ran the same work and finally killed the loop.
+    if trust_clean_exit:
+        return False
+    return bool(PROVIDER_RATE_LIMIT_RE.search(output))
+
+
+def timestamp_prefix(now: float | None = None) -> bytes:
+    """Wall-clock `[HH:MM:SS] ` marker used to stamp streamed provider output."""
+    moment = time.localtime(now if now is not None else time.time())
+    return time.strftime("[%H:%M:%S] ", moment).encode("ascii")
+
+
+class TimestampPrefixer:
+    """Prefix each line of streamed provider output with a wall-clock time.
+
+    A long autonomous increment can go minutes between visible lines; without a
+    timestamp on every relayed line a watcher cannot tell "thinking" from
+    "wedged". This stamps the STREAMED copy only — the captured transcript that
+    is logged and scanned for rate-limit signatures stays byte-exact. It tracks
+    line-start state across calls so chunked, non-line-aligned output (a PTY that
+    emits half a line at a time) is still stamped exactly once per line.
+    """
+
+    def __init__(self, enabled: bool = True, clock: Any | None = None) -> None:
+        self.enabled = enabled
+        self.at_line_start = True
+        self._clock = clock or time.time
+
+    def apply(self, raw: bytes) -> bytes:
+        if not self.enabled or not raw:
+            return raw
+        stamp = timestamp_prefix(self._clock())
+        out = bytearray()
+        i = 0
+        n = len(raw)
+        while i < n:
+            if self.at_line_start:
+                out += stamp
+                self.at_line_start = False
+            nl = raw.find(b"\n", i)
+            if nl == -1:
+                out += raw[i:]
+                break
+            out += raw[i : nl + 1]
+            i = nl + 1
+            self.at_line_start = True
+        return bytes(out)
 
 
 def wake_diagnostics() -> dict[str, Any]:

@@ -58,7 +58,7 @@ command -v ralph-robin
 Prefer a pre-built artifact? Each [release](https://github.com/chrisgleissner/llm-tools/releases) ships a wheel ZIP archive you can install without a build step:
 
 ```bash
-pipx install https://github.com/chrisgleissner/llm-tools/releases/download/0.1.0/llm_tools-0.1.0-py3-none-any.whl
+pipx install https://github.com/chrisgleissner/llm-tools/releases/download/0.2.0/llm_tools-0.2.0-py3-none-any.whl
 ```
 
 ### From a local checkout
@@ -428,7 +428,7 @@ llm-scheduler --wake-test
 python -m pip install -e . pytest coverage
 coverage run -m pytest
 coverage combine
-coverage report --fail-under=80
+coverage report --fail-under=85
 ```
 
 Tests use fixtures and mock commands. They do not require real Codex, Claude, Copilot, credentials, network access, or the user’s real home directory.

@@ -472,6 +472,18 @@ def test_common_extra_branches(env: dict[str, str], fake_bin: Path, tmp_path: Pa
     assert common.output_is_retryable(0, "rate limit reached") is True
     assert common.output_is_retryable(0, "HTTP 429 Too Many Requests") is True
     assert common.output_is_retryable(42, "") is True
+    # A model describing the SYSTEM UNDER TEST is not a provider rate limit: these
+    # bare words must NOT trip a retry (the bug that re-ran/killed the loop).
+    assert common.output_is_retryable(0, "the c64u device was overloaded and dropped out") is False
+    assert common.output_is_retryable(0, "the REST endpoint was temporarily unavailable; try again later") is False
+    assert common.output_is_retryable(0, "no rate-limit issues were observed this loop") is False
+    # Genuine provider/transport signatures still retry.
+    assert common.output_is_retryable(0, 'API Error: {"type":"overloaded_error"}') is True
+    assert common.output_is_retryable(0, "HTTP 503 Service Unavailable") is True
+    # trust_clean_exit (ralph-robin owns rate-limit handling) trusts exit 0 even
+    # when the transcript pastes a device log that looks like a rate limit.
+    assert common.output_is_retryable(0, "device log: HTTP 429 Too Many Requests", trust_clean_exit=True) is False
+    assert common.output_is_retryable(1, "boom", trust_clean_exit=True) is True
     assert common.argv_to_command_line(["a b", "$x"]) == "'a b' '$x'"
     assert common.template_argv("cmd {tool} {prompt_file} {cwd}", tool="codex", prompt="p", prompt_file=tmp_path / "p.txt", cwd="/tmp") == ["cmd", "codex", str(tmp_path / "p.txt"), "/tmp"]
     assert common.read_copilot_live(env | {"LLM_USAGE_DISABLE_COPILOT": "1"})["reason"] == "disabled"
