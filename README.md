@@ -17,7 +17,7 @@ Small command-line tools for keeping local LLM CLIs productive, observable, and 
 | `llm-scheduler` | Submit one prompt to one selected CLI as soon as that CLI has usable capacity.                              |
 | `ralph-robin`   | Keep autonomous work moving by rotating across configured CLIs instead of stopping at the first rate limit. |
 
-<img src="./docs/img/llm-usage.png" alt="LLM Usage"/>
+<img src="./docs/img/llm-usage2.png" alt="LLM Usage"/>
 
 ## Required Dependencies
 
