@@ -235,7 +235,7 @@ Use `ralph-robin` when the task matters more than which LLM provider runs it.
 
 It runs a [Ralph loop](https://venturebeat.com/technology/how-ralph-wiggum-went-from-the-simpsons-to-the-biggest-name-in-ai-right-now/): a persistent autonomous workflow that keeps going instead of stopping when one provider reaches a limit, stalls, or becomes temporarily unusable. This makes it useful for long-running autonomous coding, repair, hardening, documentation, and investigation loops where stopping at the first rate limit would waste time.
 
-`ralph-robin` wraps `llm-scheduler` and rotates across the configured providers. It can rotate only when the current provider is exhausted, or distribute work more evenly to burn down provider limits at a similar rate (default).
+`ralph-robin` wraps `llm-scheduler` and rotates (i.e. round-robins, hence the name) across the configured providers. It can rotate only when the current provider is exhausted, or distribute work more evenly to burn down provider limits at a similar rate (default).
 
 When Ralph selects Claude Code through the built-in adapter, it uses Claude's `stream-json` print mode and renders that event stream as readable stdout so assistant text, tool calls, and tool results appear while the run is active.
 
@@ -247,13 +247,19 @@ ralph-robin --prompt-file task.md --tmux llm-work
 ralph-robin --prompt-file task.md --dry-run
 ```
 
-At start-up, the chosen provider is printed:
+All decisions by ralph-robin, as well as all requests to and output from the underlying CLI LLM tool are logged to stdout:
 
-```bash
-ralph-robin --prompt-file ralph.md
-◆ ralph-robin: · logs: /home/chris/.cache/llm-tools/ralph-robin/logs/20260612-155359-ralph-robin-vp0wu5qd
-◆ ralph-robin: · usage claude: usable (5h 32% left, weekly 84% left) | codex: usable (5h 21% left, weekly 51% left)
-◆ ralph-robin: ✓ selected claude (even-burn)
+```text
+ralph-robin --prompt-file /home/chris/dev/ralph.prompt.md
+[16:22:47] ◆ ralph-robin: · logs: /home/chris/.cache/llm-tools/ralph-robin/logs/20260613-162247-ralph-robin-r67_na63
+[16:22:47] ◆ ralph-robin: · usage claude: usable (5h 22% left, weekly 85% left) | codex: usable (5h 99% left, weekly 35% left)
+[16:22:47] ◆ ralph-robin: ✓ selected claude (even-burn)
+[16:22:52] I'll begin the RALPH loop iteration following FAST-PATH STARTUP. Let me start by establishing current state.
+[16:22:54] Tool call: Bash
+[16:22:54] {
+[16:22:54]   "command": "git status && echo \"---LATEST COMMIT---\" && git log --oneline -5 && echo \"---BRANCH---\" && git branch --show-current",
+[16:22:54]   "description": "Check git status, branch, and recent commits"
+[16:22:54] }
 ```
 
 Options:
