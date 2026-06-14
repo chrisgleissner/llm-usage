@@ -7,31 +7,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue)](https://github.com/chrisgleissner/llm-tools/releases)
 
-Small command-line tools for keeping local LLM CLIs productive, observable, and usable across rate-limit and capacity scopes. They run on Linux and macOS; the wake/suspend features are Linux-only (see [Requirements](#requirements)).
-
-## Capacity scope model
-
-`llm-tools` calls every quota/quota-like constraint a **scope**. A scope is
-a single, named capacity measure that one provider exposes. The four scope
-kinds model every supported provider without special-casing:
-
-| Kind            | Resets? | Example                                    | Providers    |
-| --------------- | ------- | ------------------------------------------ | ------------ |
-| `reset_window`  | yes     | `5h`, `weekly`, `monthly`                  | Codex, Claude, Copilot |
-| `balance`       | no      | Kilo credit balance, GBP/USD/credits      | Kilo         |
-| `budget`        | yes     | Kilo monthly spend budget                 | Kilo         |
-| `ungated`       | n/a     | BYOK / local / `kilo ungated`              | Kilo         |
-
-Kilo Code CLI is the reason this model exists: its governing constraints
-are funded balance, an optional monthly budget, or a BYOK/local mode.
-Kilo is **not** forced into a fake session window.
-
-`llm-usage` shows every scope as a table row. `--scope` (replacing the
-legacy `--window`) selects which scope to gate on. Per-tool allow-lists:
-
-* `codex`, `claude`: `auto | 5h | weekly`
-* `copilot`: `auto | monthly`
-* `kilo`: `auto | balance | budget | byok | ungated`
+Small command-line tools for keeping local LLM CLIs productive, observable, and usable across rate-limit and capacity scopes. They run on Linux and macOS. The wake/suspend features are Linux-only (see [Requirements](#requirements)).
 
 ## What Each Tool Is For
 
@@ -49,11 +25,12 @@ These tools drive the official command-line clients of the supported LLM provide
 
 | Provider       | CLI binary             | Download / install                                                                                    |
 | -------------- | ---------------------- | ----------------------------------------------------------------------------------------------------- |
-| OpenAI Codex   | `codex`                | [github.com/openai/codex](https://github.com/openai/codex) - `npm install -g @openai/codex`           |
-| Claude Code    | `claude`               | [claude.com/product/claude-code](https://www.claude.com/product/claude-code) - `npm install -g @anthropic-ai/claude-code` |
-| GitHub Copilot | `copilot`              | [github.com/github/copilot-cli](https://github.com/github/copilot-cli) - `npm install -g @github/copilot` |
-| Kilo Code CLI  | `kilo`                 | [kilo.ai](https://kilo.ai) - `npm install -g @kilocode/cli`                                            |
-| MiniMax        | `mmx`                  | local install (drop `mmx` on `PATH`; runs `mmx quota show --output json` for usage)                   |
+| Claude         | `claude`               | [claude.com/product/claude-code](https://www.claude.com/product/claude-code) - `npm install -g @anthropic-ai/claude-code`     |
+| Codex          | `codex`                | [github.com/openai/codex](https://github.com/openai/codex) - `npm install -g @openai/codex`           |
+| Copilot        | `copilot`              | [github.com/github/copilot-cli](https://github.com/github/copilot-cli) - `npm install -g @github/copilot` |
+| Kilo Code      | `kilo`                 | [kilo.ai](https://kilo.ai) - `npm install -g @kilocode/cli`                                            |
+| MiniMax        | `mmx`                  | [minimax.io](https://platform.minimax.io/) - `npm install -g mmx-cli`     |
+| OpenCode       | `opencode`             | [opencode.ai](https://opencode.ai/) - `npm install -g opencode-ai`     |
 
 After installing, authenticate each CLI once (e.g. `codex`, `claude`, `copilot`, `kilo`, `mmx`) so it has a usable local session.
 
@@ -175,6 +152,8 @@ tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/attempt-1.out
 
 Use `llm-usage` before starting work, in status lines, or in scripts that need a compact view of local usage state.
 
+### Usage
+
 ```bash
 llm-usage
 llm-usage --json
@@ -216,7 +195,31 @@ The table answers four questions quickly:
 - **Remaining** - remaining quota, balance, or `unmetered`/`byok`/`local` for ungated scopes.
 - **Resets in** - relative reset time first, so near-term recovery is easy to scan. `-` for non-reset scopes.
 
-Options:
+
+### Scope
+
+`llm-tools` calls every quota/quota-like constraint a **scope**. A scope is
+a single, named capacity measure that one provider exposes. The four scope
+kinds model every supported provider without special-casing:
+
+| Kind            | Resets? | Example                                    | Providers    |
+| --------------- | ------- | ------------------------------------------ | ------------ |
+| `reset_window`  | yes     | `5h`, `weekly`, `monthly`                  | Codex, Claude, Copilot, MiniMax |
+| `balance`       | no      | Kilo credit balance, GBP/USD/credits       | Kilo, OpenCode         |
+| `budget`        | yes     | Kilo monthly spend budget                  | Kilo, OpenCode         |
+| `ungated`       | n/a     | BYOK / local / `kilo ungated`              | Kilo, OpenCode         |
+
+`llm-usage` shows every scope as a table row. `--scope` (replacing the
+legacy `--window`) selects which scope to gate on. 
+
+Per-tool allow-lists:
+
+* `Codex`, `Claude`, `MiniMax`: `auto | 5h | weekly`
+* `Copilot`: `auto | monthly`
+* `Kilo Code`, `OpenCode`: `auto | balance | budget | byok | ungated`
+
+
+### Options
 
 | Option                   | Purpose                                                                  |
 | ------------------------ | ------------------------------------------------------------------------ |
@@ -237,6 +240,8 @@ Options:
 Use `llm-scheduler` when one specific provider should run one specific prompt, but only once capacity is available.
 
 It is best for delayed launches, rate-limit-aware retries, tmux launches, wake scheduling, and suspend-until-ready workflows.
+
+### Usage
 
 ```bash
 llm-scheduler --tool codex --prompt-file task.md
@@ -264,7 +269,7 @@ Behavior:
 * tmux mode: runs inside the requested tmux session/window.
 * Exits after success, terminal failure, or retry exhaustion.
 
-Options:
+### Options
 
 | Option                                | Purpose                                                                                                                                      |
 | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -315,6 +320,8 @@ It runs a [Ralph loop](https://venturebeat.com/technology/how-ralph-wiggum-went-
 
 When Ralph selects Claude Code through the built-in adapter, it uses Claude's `stream-json` print mode and renders that event stream as readable stdout so assistant text, tool calls, and tool results appear while the run is active.
 
+### Usage
+
 ```bash
 ralph-robin --prompt-file task.md
 ralph-robin --prompt "Continue until tests pass"
@@ -343,7 +350,7 @@ increment is distinguishable from a wedged one and the active provider is always
 clear. Customize the prefix with `--prefix` (e.g. `--prefix time,tool,usage` to
 also show remaining quota, `--prefix none` to turn it off entirely).
 
-Options:
+### Options
 
 | Option               | Purpose                                                                                                    |
 | -------------------- | ---------------------------------------------------------------------------------------------------------- |
@@ -379,7 +386,7 @@ Passed through to `llm-scheduler`:
 --headless-question-timeout
 ```
 
-Behavior:
+### Behavior
 
 * Defaults to autonomous headless launches, even from an interactive terminal.
 * Defaults to even burn-down: when several providers are ready, the rotator prefers the one with the highest remaining capacity per day. Reset-window (`weekly`) and budget scopes are both pace-rankable; balance and ungated scopes are usable but not pace-rankable. Kilo's `budget` scope participates in even-burn alongside Codex/Claude `weekly`. A provider with an unknown or stale reset is assumed to have a full week, so it is still ranked rather than skipped.
@@ -390,6 +397,8 @@ Behavior:
 * Disables colors for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
 * If usage cannot be measured, tries that provider before suspending.
 * If a provider exits with a scheduler autonomy abort, skips it for the current invocation and tries the next usable provider.
+
+### Config Overrides
 
 Color overrides:
 
