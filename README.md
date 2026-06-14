@@ -185,24 +185,34 @@ Bars: █ available · ░ spent
 Guidance: 5h rows forecast runout; weekly/monthly/budget rows compare remaining quota to time left.
           ✓ lasts until reset · ! empty before reset · × empty · ↑ headroom · = on pace · ↓ conserve
 
-Tool       Ready   Scope     Remaining         Guidance              Resets in
-────────   ─────   ───────   ───────────────   ───────────────────   ──────────
-Codex      yes     5h        90% █████████░    ✓ lasts until reset   4h 34m
-                   weekly    34% ███░░░░░░░    ↓ conserve            5d 2h
+Tool       Model     Ready   Scope     Remaining         Guidance              Resets in
+────────   ───────   ─────   ───────   ───────────────   ───────────────────   ──────────
+Codex                yes     5h        90% █████████░    ✓ lasts until reset   4h 34m
+                             weekly    34% ███░░░░░░░    ↓ conserve            5d 2h
+           Spark             5h       100% ██████████    ✓ lasts until reset   4h 34m
+                             weekly    96% █████████░    ↑ headroom            6d 1h
 
-Claude     no      5h         0% ░░░░░░░░░░    × empty               36m
-                   weekly    91% █████████░    ↑ headroom            5d
+Claude               no      5h         0% ░░░░░░░░░░    × empty               36m
+                             weekly    91% █████████░    ↑ headroom            5d
+           Sonnet            weekly   100% ██████████    ↑ headroom            5d
 
-Copilot    yes     monthly   36% ████░░░░░░    ↓ conserve            17d 11h
+Copilot              yes     monthly   36% ████░░░░░░    ↓ conserve            17d 11h
 
-Kilo       yes     balance   £12.40            ✓ funded              -
-                   budget    62% ██████░░░░    ↑ headroom            17d 4h
+Kilo                 yes     balance   £12.40            ✓ funded              -
+                             budget    62% ██████░░░░    ↑ headroom            17d 4h
 ```
+
+The `Model` column only appears when a provider reports model-specific limits.
+These sub-rows sit under their provider's section: Codex surfaces its `Spark`
+model, and Claude surfaces per-model weekly limits (e.g. `Sonnet`) alongside the
+aggregate window. Model rows are informational — they are shown for visibility
+but do not gate scheduling, which always uses the provider's aggregate scopes.
 
 How to read the table:
 
 | Column      | Meaning                                                                                                                                            |
 | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Model`     | The specific model a row reports on (e.g. `Spark`, `Sonnet`). Blank for a provider's aggregate rows. Only shown when model-specific data exists.   |
 | `Ready`     | `yes` means every blocking scope for that tool has usable capacity now. `no` means at least one scope must reset or recover.                       |
 | `Scope`     | The capacity measure, such as `5h`, `weekly`, `monthly`, `balance`, or `budget`.                                                                   |
 | `Remaining` | Remaining percentage, balance, or an unmetered state such as `byok`, `local`, or `ungated`.                                                        |
