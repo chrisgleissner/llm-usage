@@ -18,7 +18,7 @@ from . import common
 APP_NAME = "llm-scheduler"
 
 
-USAGE = """Usage: llm-scheduler --tool codex|claude|copilot|kilo (--prompt TEXT | --prompt-file FILE) [options]
+USAGE = """Usage: llm-scheduler --tool codex|claude|copilot|kilo|opencode|minimax (--prompt TEXT | --prompt-file FILE) [options]
 
 Submit a prompt to a local LLM CLI as soon as shared llm-usage data says it is usable.
 
@@ -27,14 +27,16 @@ in its normal interactive form attached directly to that terminal: output,
 key input, window resizes, and Ctrl-C behave exactly as if the CLI had been
 started directly in the shell. Without a terminal (pipes, cron, systemd
 resume) or with --headless, the non-interactive form (claude --print,
-codex exec, copilot --prompt, kilo run --auto) runs on a captured PTY
-instead.
+codex exec, copilot --prompt, kilo run --auto, opencode run, mmx run --auto)
+runs on a captured PTY instead.
 
 Examples:
   llm-scheduler --tool codex --prompt-file task.md
   llm-scheduler --tool claude --prompt "Continue the work in this repo until CI is green"
   llm-scheduler --tool copilot --prompt-file task.md --retry-delays 60,180,600
   llm-scheduler --tool kilo --prompt-file task.md
+  llm-scheduler --tool opencode --prompt-file task.md
+  llm-scheduler --tool minimax --prompt-file task.md
   llm-scheduler --tool codex --prompt-file task.md --at "23:05"
   llm-scheduler --tool codex --prompt-file task.md --tmux llm-work
   llm-scheduler --tool codex --prompt-file task.md --wake
@@ -42,14 +44,14 @@ Examples:
   llm-scheduler --tool codex --prompt-file task.md --dry-run
 
 Options:
-  --tool TOOL                 codex, claude, copilot, or kilo.
+  --tool TOOL                 codex, claude, copilot, kilo, opencode, or minimax.
   --prompt TEXT               Prompt text.
   --prompt-file FILE          Read prompt from FILE, preserving content.
   --at TIME, --not-before TIME  Do not submit before date -d compatible local time.
   --scope auto|5h|weekly|monthly|balance|budget|byok|ungated
                                Capacity scope to gate on (default: auto).
-                               codex/claude: auto|5h|weekly; copilot: auto|monthly;
-                               kilo: auto|balance|budget|byok|ungated.
+                               codex/claude/minimax: auto|5h|weekly; copilot: auto|monthly;
+                               kilo/opencode: auto|balance|budget|byok|ungated.
   --min-remaining PERCENT     Minimum required remaining percentage (default: 1).
   --poll-interval SECONDS     Poll interval when reset data is unavailable (default: 60).
   --max-unavailable-wait SECONDS  Max time to keep polling while usage data cannot be
@@ -235,7 +237,7 @@ def parse_date_d(text: str) -> int | None:
 def validate_args(cfg: SchedulerConfig) -> None:
     if cfg.wake_test:
         return
-    if cfg.tool not in {"codex", "claude", "copilot", "kilo"}:
+    if cfg.tool not in {"codex", "claude", "copilot", "kilo", "opencode", "minimax"}:
         if not cfg.tool:
             common.err("--tool is required")
         else:
@@ -346,7 +348,7 @@ def highlight_provider_text(raw: bytes, *, stream_name: str, enabled: bool) -> b
             role = "diff_remove"
         elif re.search(r"\b(tool call|function call|exec_command|apply_patch|running command|command:)\b", stripped, re.I):
             role = "tool"
-        elif re.match(r"^(\$|>|python\b|pytest\b|git\b|gh\b|./|llm-|codex\b|claude\b|copilot\b|kilo\b|bash\b|make\b|npm\b|pnpm\b)", stripped):
+        elif re.match(r"^(\$|>|python\b|pytest\b|git\b|gh\b|./|llm-|codex\b|claude\b|copilot\b|kilo\b|opencode\b|minimax\b|mmx\b|bash\b|make\b|npm\b|pnpm\b)", stripped):
             role = "command"
         elif re.search(r"\b(error|failed|failure|rate[- ]limit|autonomous abort|blocked)\b", stripped, re.I):
             role = "error"
@@ -370,6 +372,10 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
             return ["claude", prompt]
         if cfg.tool == "kilo":
             return ["kilo", "run", "-C", cfg.cwd, prompt]
+        if cfg.tool == "opencode":
+            return ["opencode", "-C", cfg.cwd]
+        if cfg.tool == "minimax":
+            return ["mmx"]
         return ["copilot", "-C", cfg.cwd, "-i", prompt]
     if cfg.tool == "codex":
         return ["codex", "exec", "-C", cfg.cwd, prompt]
@@ -379,6 +385,10 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
         return ["claude", "--print", prompt]
     if cfg.tool == "kilo":
         return ["kilo", "run", "--auto", "-C", cfg.cwd, prompt]
+    if cfg.tool == "opencode":
+        return ["opencode", "run", "-C", cfg.cwd, prompt]
+    if cfg.tool == "minimax":
+        return ["mmx", "run", "--auto", "-C", cfg.cwd, prompt]
     return ["copilot", "-C", cfg.cwd, "--prompt", prompt]
 
 
@@ -396,6 +406,8 @@ def scheduler_model_description(cfg: SchedulerConfig) -> str:
         "claude": "Claude Code default/configured model",
         "copilot": "GitHub Copilot CLI default/configured model",
         "kilo": "Kilo Code CLI default/configured model",
+        "opencode": "OpenCode CLI default/configured model",
+        "minimax": "MiniMax default/configured model",
     }[cfg.tool]
 
 

@@ -16,7 +16,7 @@ Adding a new provider is a small, well-defined change:
    ``llm_tools.scheduler.highlight_provider_text``.
 """
 
-from . import claude, codex, copilot, kilo
+from . import claude, codex, copilot, kilo, minimax, opencode
 from .claude import (
     PROVIDER_CLAUDE,
     normalize as claude_normalize,
@@ -46,24 +46,55 @@ from .kilo import (
     kilo_monthly_reset_epoch,
     read_kilo,
 )
+from .minimax import (
+    minimax_cli,
+    minimax_command_argv,
+    minimax_model,
+    read_minimax,
+)
+from .opencode import (
+    OPENCODE_MODES,
+    opencode_cli,
+    opencode_command_argv,
+    opencode_currency,
+    opencode_min_balance,
+    opencode_mode,
+    opencode_monthly_reset_epoch,
+    read_opencode,
+)
 
 
 __all__ = [
     "KILO_MODES",
+    "OPENCODE_MODES",
     "PROVIDER_CLAUDE",
     "PROVIDER_CODEX",
     "PROVIDER_COPILOT",
+    "PROVIDER_MINIMAX",
+    "PROVIDER_OPENCODE",
     "claude",
     "claude_normalize",
     "codex",
     "codex_normalize",
     "copilot",
+    "kilo",
     "kilo_cli",
     "kilo_command_argv",
     "kilo_currency",
     "kilo_min_balance",
     "kilo_mode",
     "kilo_monthly_reset_epoch",
+    "minimax",
+    "minimax_cli",
+    "minimax_command_argv",
+    "minimax_model",
+    "opencode",
+    "opencode_cli",
+    "opencode_command_argv",
+    "opencode_currency",
+    "opencode_min_balance",
+    "opencode_mode",
+    "opencode_monthly_reset_epoch",
     "read_claude",
     "read_claude_api",
     "read_claude_snapshot",
@@ -73,5 +104,7 @@ __all__ = [
     "read_copilot_live",
     "read_copilot_snapshot",
     "read_kilo",
+    "read_minimax",
+    "read_opencode",
 ]
 

@@ -1113,6 +1113,8 @@ def validate_tool_scope(tool: str, scope: str) -> None:
             err(f"--scope {scope} is not valid for copilot (use one of: {', '.join(sorted(allowed))})")
         elif tool == "kilo":
             err(f"--scope {scope} is not valid for kilo (use one of: {', '.join(sorted(allowed))})")
+        elif tool == "minimax":
+            err(f"--scope {scope} is not valid for minimax (use one of: {', '.join(sorted(allowed))})")
         else:
             err(f"--scope {scope} is not valid for {tool} (use one of: {', '.join(sorted(allowed))})")
         raise SystemExit(2)
@@ -1261,6 +1263,26 @@ def usage_snapshot_for_tool(tool: str, env: dict[str, str] | None = None) -> dic
             "selected_model": snap.selected_model,
             "scopes": [_scope_to_dict(s) for s in snap.scopes],
         }
+    if tool == "opencode":
+        snap = _opencode_snapshot(env)
+        return {
+            "provider": snap.provider,
+            "available": snap.available,
+            "reason": snap.reason,
+            "source": snap.source,
+            "selected_model": snap.selected_model,
+            "scopes": [_scope_to_dict(s) for s in snap.scopes],
+        }
+    if tool == "minimax":
+        snap = _minimax_snapshot(env)
+        return {
+            "provider": snap.provider,
+            "available": snap.available,
+            "reason": snap.reason,
+            "source": snap.source,
+            "selected_model": snap.selected_model,
+            "scopes": [_scope_to_dict(s) for s in snap.scopes],
+        }
     return {"provider": tool, "available": False, "reason": "unsupported-tool"}
 
 
@@ -1268,6 +1290,18 @@ def _kilo_snapshot(env: dict[str, str] | None):
     from .providers import read_kilo
 
     return read_kilo(env)
+
+
+def _opencode_snapshot(env: dict[str, str] | None):
+    from .providers import read_opencode
+
+    return read_opencode(env)
+
+
+def _minimax_snapshot(env: dict[str, str] | None):
+    from .providers import read_minimax
+
+    return read_minimax(env)
 
 
 def _scope_to_dict(scope: Any) -> dict[str, Any]:
@@ -1338,7 +1372,7 @@ def _legacy_snapshot_to_scopes(snapshot: dict[str, Any]) -> list[dict[str, Any]]
 
 def _decision_scopes(snapshot: dict[str, Any], tool: str) -> list[dict[str, Any]]:
     """Return the decision-ready scope dicts for ``tool``."""
-    if tool == "kilo":
+    if tool in ("kilo", "opencode", "minimax"):
         existing = snapshot.get("scopes")
         if isinstance(existing, list) and existing and isinstance(existing[0], dict) and "kind" in existing[0]:
             return existing
@@ -1489,10 +1523,12 @@ def usage_decision_for_tool(tool: str, window: str, min_remaining: str, poll_int
     min_percent = float(min_remaining)
     min_amount = float(min_remaining)
     try:
-        from .providers import kilo_min_balance
+        from .providers import kilo_min_balance, opencode_min_balance
 
         if tool == "kilo":
             min_amount = kilo_min_balance(env)
+        elif tool == "opencode":
+            min_amount = opencode_min_balance(env)
     except Exception:
         pass
 

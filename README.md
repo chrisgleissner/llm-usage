@@ -53,8 +53,9 @@ These tools drive the official command-line clients of the supported LLM provide
 | Claude Code    | `claude`               | [claude.com/product/claude-code](https://www.claude.com/product/claude-code) - `npm install -g @anthropic-ai/claude-code` |
 | GitHub Copilot | `copilot`              | [github.com/github/copilot-cli](https://github.com/github/copilot-cli) - `npm install -g @github/copilot` |
 | Kilo Code CLI  | `kilo`                 | [kilo.ai](https://kilo.ai) - `npm install -g @kilocode/cli`                                            |
+| MiniMax        | `mmx`                  | local install (drop `mmx` on `PATH`; runs `mmx quota show --output json` for usage)                   |
 
-After installing, authenticate each CLI once (e.g. `codex`, `claude`, `copilot`, `kilo`) so it has a usable local session.
+After installing, authenticate each CLI once (e.g. `codex`, `claude`, `copilot`, `kilo`, `mmx`) so it has a usable local session.
 
 **You do not need all of them.** Every tool works with whatever subset of provider CLIs is installed and authenticated:
 
@@ -81,6 +82,28 @@ When the `kilo` binary is on `PATH`, `llm-usage` and `llm-scheduler` also
 try `kilo stats` first (JSON or text) and fall back to the env-vars above
 when it is missing or unparseable. `--scope auto` prefers `budget` when
 configured, otherwise `balance`, otherwise `ungated`.
+
+### MiniMax setup
+
+MiniMax ships its quota through the local `mmx` CLI, which is what `llm-usage`
+and `llm-scheduler` read first; an env-var fallback keeps tests deterministic:
+
+| Variable                          | Purpose                                                                                   |
+| --------------------------------- | ----------------------------------------------------------------------------------------- |
+| `LLM_USAGE_MINIMAX_5H_PERCENT`    | Remaining percent for the 5h session window (0..100)                                     |
+| `LLM_USAGE_MINIMAX_5H_RESET_EPOCH`| Epoch seconds (or milliseconds) when the 5h window resets                                 |
+| `LLM_USAGE_MINIMAX_WEEKLY_PERCENT`| Remaining percent for the weekly window (0..100)                                          |
+| `LLM_USAGE_MINIMAX_WEEKLY_RESET_EPOCH` | Epoch seconds (or milliseconds) when the weekly window resets                       |
+| `LLM_USAGE_MINIMAX_MODEL`         | Which `model_remains` row to read (default `general`)                                     |
+| `LLM_USAGE_MINIMAX_TIMEOUT`       | `mmx quota show` timeout in seconds (default 10)                                          |
+
+When the `mmx` binary is on `PATH`, `llm-usage` and `llm-scheduler` try
+`mmx quota show --output json` first and fall back to the env-vars above
+when the CLI is missing or unparseable. The reader picks the `general`
+row from the `model_remains` array and surfaces the same 5h/weekly reset
+windows Claude Code and Codex use, so the table renders and gates
+identically. The MiniMax row only appears when the `mmx` CLI is installed
+or the env-vars are set.
 
 ## Install
 
@@ -137,6 +160,7 @@ Or run the tools straight from a checkout without installing:
 llm-usage --watch 60
 llm-scheduler --tool codex --prompt-file task.md
 llm-scheduler --tool kilo --prompt-file task.md
+llm-scheduler --tool minimax --prompt-file task.md
 ralph-robin --prompt-file task.md
 ```
 
@@ -196,7 +220,7 @@ Options:
 
 | Option                   | Purpose                                                                  |
 | ------------------------ | ------------------------------------------------------------------------ |
-| `--json`                 | Print stable JSON with `generated_at`, `codex`, `claude`, and `copilot`. |
+| `--json`                 | Print stable JSON with `generated_at`, `codex`, `claude`, `copilot`, `kilo`, `opencode`, and `minimax`. |
 | `--watch/-w SECONDS`     | Refresh continuously.                                                    |
 | `--show-source`          | Show where each usage row came from.                                     |
 | `--show-copilot-credits` | Include Copilot AI credits when parseable.                               |
@@ -219,6 +243,7 @@ llm-scheduler --tool codex --prompt-file task.md
 llm-scheduler --tool claude --prompt "Continue the work in this repo until CI is green"
 llm-scheduler --tool copilot --prompt-file task.md --retry-delays 60,180,600
 llm-scheduler --tool kilo --prompt-file task.md
+llm-scheduler --tool minimax --prompt-file task.md
 llm-scheduler --tool codex --prompt-file task.md --at "23:05"
 llm-scheduler --tool codex --prompt-file task.md --tmux llm-work
 llm-scheduler --tool codex --prompt-file task.md --wake
@@ -229,7 +254,7 @@ llm-scheduler --tool codex --prompt-file task.md --dry-run
 Required form:
 
 ```bash
-llm-scheduler --tool codex|claude|copilot|kilo (--prompt TEXT | --prompt-file FILE) [options]
+llm-scheduler --tool codex|claude|copilot|kilo|minimax (--prompt TEXT | --prompt-file FILE) [options]
 ```
 
 Behavior:
@@ -293,7 +318,7 @@ When Ralph selects Claude Code through the built-in adapter, it uses Claude's `s
 ```bash
 ralph-robin --prompt-file task.md
 ralph-robin --prompt "Continue until tests pass"
-ralph-robin --tools claude,codex,copilot,kilo --prompt-file task.md
+ralph-robin --tools claude,codex,copilot,kilo,minimax --prompt-file task.md
 ralph-robin --prompt-file task.md --tmux llm-work
 ralph-robin --prompt-file task.md --dry-run
 ```

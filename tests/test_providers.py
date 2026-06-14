@@ -13,8 +13,9 @@ from llm_tools.capacity import (
     PROVIDER_CODEX,
     PROVIDER_COPILOT,
     PROVIDER_KILO,
+    PROVIDER_MINIMAX,
 )
-from llm_tools.providers import claude, codex, copilot, kilo
+from llm_tools.providers import claude, codex, copilot, kilo, minimax
 
 
 def test_providers_module_exports_all_providers() -> None:
@@ -24,6 +25,7 @@ def test_providers_module_exports_all_providers() -> None:
         (claude, "claude"),
         (copilot, "copilot"),
         (kilo, "kilo"),
+        (minimax, "minimax"),
     ):
         assert inspect.ismodule(module), f"providers.{name} is not a module"
         # Each adapter exposes a read(env) that returns a ProviderSnapshot.
@@ -80,3 +82,17 @@ def test_kilo_snapshot_uses_env(env: dict[str, str]) -> None:
     balance = next(s for s in snap.scopes if s.kind == CapacityKind.BALANCE)
     assert balance.remaining_amount == 5.0
     assert balance.currency == "USD"
+
+
+def test_minimax_snapshot_uses_env(env: dict[str, str]) -> None:
+    env["PATH"] = "/var/empty"
+    env["LLM_USAGE_MINIMAX_5H_PERCENT"] = "75"
+    env["LLM_USAGE_MINIMAX_5H_RESET_EPOCH"] = "1700000000"
+    env["LLM_USAGE_MINIMAX_WEEKLY_PERCENT"] = "97"
+    env["LLM_USAGE_MINIMAX_WEEKLY_RESET_EPOCH"] = "1700003600"
+    snap = minimax.read(env)
+    assert snap.provider == PROVIDER_MINIMAX
+    assert {s.name for s in snap.scopes} == {"5h", "weekly"}
+    for scope in snap.scopes:
+        assert scope.kind == CapacityKind.RESET_WINDOW
+        assert scope.remaining_percent is not None

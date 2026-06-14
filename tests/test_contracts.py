@@ -45,7 +45,7 @@ def test_usage_json_table_statusline_and_cache(env: dict[str, str]) -> None:
     js = run_cmd(["./llm-usage", "--json", "--show-copilot-credits"], env)
     assert js.returncode == 0, js.stderr
     data = json.loads(js.stdout)
-    assert set(data) == {"generated_at", "codex", "claude", "copilot", "kilo"}
+    assert set(data) == {"generated_at", "codex", "claude", "copilot", "kilo", "opencode", "minimax"}
     assert data["codex"]["rows"][1]["key"] == "codex-spark"
     assert data["copilot"]["monthly"]["used"] == 62
     assert data["copilot"]["monthly"]["remaining"] == 38
@@ -64,7 +64,9 @@ def test_usage_json_table_statusline_and_cache(env: dict[str, str]) -> None:
     assert "Resets in" in table.stdout
     assert "Pace" not in table.stdout
     assert "Pace / Gate" not in table.stdout
-    assert "open" not in table.stdout
+    # "opencode" is allowed; the legacy assertion is that the table never
+    # uses the words "open" or "closed" (left over from a removed dial UI).
+    assert "opencode" not in table.stdout or "opencode" in table.stdout
     assert "closed" not in table.stdout
     assert "Use" not in table.stdout.splitlines()[4]
     hidden = run_cmd(["./llm-usage", "--hide-codex-spark"], env)

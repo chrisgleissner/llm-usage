@@ -54,13 +54,13 @@ rotation. Use llm-scheduler directly for an attached interactive run.
 Examples:
   ralph-robin --prompt-file task.md
   ralph-robin --prompt "Continue until tests pass"
-  ralph-robin --tools claude,codex,copilot,kilo --prompt-file task.md
+  ralph-robin --tools claude,codex,copilot,kilo,opencode,minimax --prompt-file task.md
   ralph-robin --prompt-file task.md --tmux llm-work
   ralph-robin --prompt-file task.md --dry-run
 
 Options:
   --tools LIST                Comma-separated tools in rotation (default: claude,codex).
-                              Values: codex, claude, copilot, kilo.
+                              Values: codex, claude, copilot, kilo, opencode, minimax.
   --prompt TEXT               Prompt text.
   --prompt-file FILE          Read prompt from FILE, preserving content.
   --scope auto|5h|weekly|monthly|balance|budget|byok|ungated
@@ -296,7 +296,7 @@ def parse_tools(raw: str) -> list[str]:
         tool = trim(part)
         if not tool:
             continue
-        if tool not in {"codex", "claude", "copilot", "kilo"}:
+        if tool not in {"codex", "claude", "copilot", "kilo", "opencode", "minimax"}:
             common.err(f"invalid tool in --tools: {tool}")
             raise SystemExit(2)
         tools.append(tool)

@@ -35,6 +35,7 @@ Shows remaining capacity per scope for:
   - Copilot monthly usage
   - Copilot AI credits (optional, with --show-copilot-credits)
   - Kilo balance, monthly budget, and BYOK/local/ungated state
+  - MiniMax 5-hour and weekly windows (when the mmx CLI is on PATH)
 
 Options:
   --json              Emit JSON instead of a table.
@@ -676,12 +677,20 @@ def kilo_rows(cfg: Config, kilo_json: dict[str, Any] | None) -> list[UsageRow]:
         if kind == CapacityKind.BALANCE:
             amount = scope.get("remaining_amount")
             currency = scope.get("currency")
-            text = format_balance(amount, currency)
+            extras = scope.get("extras") or {}
+            if extras.get("spent") and amount is not None:
+                text = format_spent(amount, currency)
+                # Spent-cost rows are informational; the tool is ready when
+                # the snapshot says the CLI is present and functional.
+                row_remaining: float | None = 1.0 if kilo_json.get("available") else None
+            else:
+                text = format_balance(amount, currency)
+                row_remaining = amount
             rows.append(
                 UsageRow(
                     "Kilo",
                     "balance",
-                    None,
+                    row_remaining,
                     text,
                     None,
                     source,
@@ -731,17 +740,206 @@ def format_balance(amount: float | None, currency: str | None) -> str:
     return text
 
 
+def format_spent(amount: float | None, currency: str | None) -> str:
+    """Format a "spent" amount: ``spent $5.96``.
+
+    Used by Kilo/OpenCode stats to surface the cost we observed when
+    the user has not configured a balance, so the table does not
+    degrade to ``inconclusive-usage`` once the parser can read the CLI
+    output.
+    """
+    base = format_balance(amount, currency)
+    if base == "-":
+        return "-"
+    return f"spent {base}"
+
+
 def print_kilo_rows(cfg: Config, kilo_json: dict[str, Any] | None) -> None:
     print_usage_rows(cfg, kilo_rows(cfg, kilo_json))
 
 
+def opencode_rows(cfg: Config, opencode_json: dict[str, Any] | None) -> list[UsageRow]:
+    """Render OpenCode scopes into a flat list of table rows.
+
+    OpenCode does not have session windows: its scopes are balance,
+    budget, and (optionally) byok/local/ungated. Each scope becomes its
+    own row with a ``scope`` name that the table renders in the Scope
+    column.
+    """
+    from .capacity import CapacityKind
+
+    if not opencode_json:
+        return [UsageRow("OpenCode", "balance", None, "unavailable", None, "opencode cli")]
+    source = opencode_json.get("source", "opencode cli")
+    if opencode_json.get("available") is False:
+        reason = opencode_json.get("reason") or "unavailable"
+        rows: list[UsageRow] = []
+        rows.append(UsageRow("OpenCode", "balance", None, reason, None, source))
+        return rows
+    scopes = opencode_json.get("scopes") if isinstance(opencode_json.get("scopes"), list) else []
+    rows = []
+    for scope in scopes:
+        if not isinstance(scope, dict):
+            continue
+        name = str(scope.get("name", "?"))
+        kind = str(scope.get("kind", ""))
+        if kind == CapacityKind.UNGATED:
+            label = scope.get("label") or name
+            rows.append(
+                UsageRow(
+                    "OpenCode",
+                    name,
+                    None,
+                    str(label),
+                    None,
+                    source,
+                    "-",
+                    kind=kind,
+                    label=label,
+                )
+            )
+            continue
+        if kind == CapacityKind.BALANCE:
+            amount = scope.get("remaining_amount")
+            currency = scope.get("currency")
+            extras = scope.get("extras") or {}
+            if extras.get("spent") and amount is not None:
+                text = format_spent(amount, currency)
+                # Spent-cost rows are informational; the tool is ready when
+                # the snapshot says the CLI is present and functional.
+                row_remaining: float | None = 1.0 if opencode_json.get("available") else None
+            else:
+                text = format_balance(amount, currency)
+                row_remaining = amount
+            rows.append(
+                UsageRow(
+                    "OpenCode",
+                    "balance",
+                    row_remaining,
+                    text,
+                    None,
+                    source,
+                    "-",
+                    amount=amount,
+                    currency=currency,
+                    kind=kind,
+                )
+            )
+            continue
+        if kind == CapacityKind.BUDGET:
+            rem = scope.get("remaining_percent")
+            total = scope.get("total_amount")
+            currency = scope.get("currency")
+            reset = scope.get("reset_epoch")
+            if rem is None:
+                text = "unknown"
+            else:
+                text = row_left_text(rem)
+            remaining_time = (
+                common.estimate_remaining_time_from_log("OpenCode", "budget", rem)
+                if cfg.show_remaining_time
+                else "-"
+            )
+            rows.append(
+                UsageRow(
+                    "OpenCode",
+                    "budget",
+                    rem,
+                    text,
+                    reset,
+                    source,
+                    remaining_time or "-",
+                    amount=scope.get("remaining_amount"),
+                    currency=currency,
+                    kind=kind,
+                )
+            )
+            continue
+    if not rows:
+        rows.append(UsageRow("OpenCode", "balance", None, "unavailable", None, source))
+    return rows
+
+
+def print_opencode_rows(cfg: Config, opencode_json: dict[str, Any] | None) -> None:
+    print_usage_rows(cfg, opencode_rows(cfg, opencode_json))
+
+
+MINIMAX_DISPLAY_NAME = "MiniMax"
+
+
+def minimax_rows(cfg: Config, minimax_json: dict[str, Any] | None) -> list[UsageRow]:
+    """Render MiniMax scopes into a flat list of table rows.
+
+    MiniMax exposes the same 5h/weekly reset-window shape Claude Code
+    and Codex use, sourced from ``mmx quota show --output json``. When
+    the ``mmx`` binary is not installed and no env-var fallback is
+    configured the reader reports ``available=false`` and we render a
+    single ``unavailable`` row so the user can see why.
+    """
+    from .capacity import CapacityKind
+
+    if not minimax_json:
+        return [UsageRow(MINIMAX_DISPLAY_NAME, "5h", None, "unavailable", None, "mmx cli")]
+    source = minimax_json.get("source", "mmx cli")
+    if minimax_json.get("available") is False:
+        reason = minimax_json.get("reason") or "unavailable"
+        return [UsageRow(MINIMAX_DISPLAY_NAME, "5h", None, reason, None, source)]
+    scopes = minimax_json.get("scopes") if isinstance(minimax_json.get("scopes"), list) else []
+    rows: list[UsageRow] = []
+    for scope in scopes:
+        if not isinstance(scope, dict):
+            continue
+        if scope.get("kind") != CapacityKind.RESET_WINDOW:
+            continue
+        name = str(scope.get("name", "5h"))
+        rem = scope.get("remaining_percent")
+        reset = scope.get("reset_epoch")
+        if rem is None:
+            text = "unavailable"
+        else:
+            text = row_left_text(rem)
+        common.log_usage_sample(MINIMAX_DISPLAY_NAME, name, rem if isinstance(rem, (int, float)) else None)
+        remaining_time = (
+            common.estimate_remaining_time_from_log(MINIMAX_DISPLAY_NAME, name, rem)
+            if cfg.show_remaining_time
+            else "-"
+        )
+        rows.append(
+            UsageRow(
+                MINIMAX_DISPLAY_NAME,
+                name,
+                rem if isinstance(rem, (int, float)) else None,
+                text,
+                reset,
+                source,
+                remaining_time or "-",
+                kind=CapacityKind.RESET_WINDOW,
+            )
+        )
+    if not rows:
+        return [UsageRow(MINIMAX_DISPLAY_NAME, "5h", None, "unavailable", None, source)]
+    return rows
+
+
+def print_minimax_rows(cfg: Config, minimax_json: dict[str, Any] | None) -> None:
+    print_usage_rows(cfg, minimax_rows(cfg, minimax_json))
+
+
 def render_once(cfg: Config) -> None:
-    from .providers import read_claude_snapshot, read_copilot_snapshot, read_kilo
+    from .providers import (
+        read_claude_snapshot,
+        read_copilot_snapshot,
+        read_kilo,
+        read_minimax,
+        read_opencode,
+    )
 
     codex_legacy = common.read_codex()
     claude_snap = read_claude_snapshot()
     copilot_snap = read_copilot_snapshot()
     kilo_snap = read_kilo()
+    opencode_snap = read_opencode()
+    minimax_snap = read_minimax()
     if cfg.json_output:
         obj = {
             "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
@@ -749,10 +947,11 @@ def render_once(cfg: Config) -> None:
             "claude": common.json_for_provider(_legacy_claude(claude_snap), "claude"),
             "copilot": _legacy_copilot(copilot_snap, cfg.show_copilot_credits),
             "kilo": _kilo_to_json(kilo_snap),
+            "opencode": _opencode_to_json(opencode_snap),
+            "minimax": _minimax_to_json(minimax_snap),
         }
         print(json.dumps(obj, separators=(",", ":")))
         return
-    rows = codex_rows(cfg, codex_legacy)
     if claude_snap.available:
         legacy = _legacy_claude(claude_snap)
         source = legacy.get("source", "")
@@ -760,16 +959,17 @@ def render_once(cfg: Config) -> None:
         week_used = (legacy.get("week") or {}).get("used")
         common.log_usage_sample("Claude", "5h", common.remaining_from_used(five_used))
         common.log_usage_sample("Claude", "weekly", common.remaining_from_used(week_used))
-        rows.extend(
-            [
-                row_from_used(cfg, "Claude", "5h", five_used, (legacy.get("five_hour") or {}).get("resets_at"), source),
-                row_from_used(cfg, "Claude", "weekly", week_used, (legacy.get("week") or {}).get("resets_at"), source),
-            ]
-        )
+        rows = [
+            row_from_used(cfg, "Claude", "5h", five_used, (legacy.get("five_hour") or {}).get("resets_at"), source),
+            row_from_used(cfg, "Claude", "weekly", week_used, (legacy.get("week") or {}).get("resets_at"), source),
+        ]
     else:
-        rows.extend(unavailable_rows("Claude"))
+        rows = list(unavailable_rows("Claude"))
+    rows.extend(codex_rows(cfg, codex_legacy))
     rows.extend(copilot_rows(cfg, _legacy_copilot(copilot_snap, False)))
     rows.extend(kilo_rows(cfg, _kilo_to_json(kilo_snap)))
+    rows.extend(minimax_rows(cfg, _minimax_to_json(minimax_snap)))
+    rows.extend(opencode_rows(cfg, _opencode_to_json(opencode_snap)))
     if not cfg.no_header:
         print_dashboard_header(cfg)
         print_table_header(cfg)
@@ -859,6 +1059,79 @@ def _kilo_to_json(snap: Any) -> dict[str, Any]:
                 "resets_at": scope.resets_at,
                 "label": scope.label,
                 "source": scope.source,
+                "extras": dict(getattr(scope, "extras", {}) or {}),
+            }
+        )
+    return {
+        "provider": snap.provider,
+        "available": snap.available,
+        "reason": snap.reason,
+        "source": snap.source,
+        "selected_model": snap.selected_model,
+        "scopes": scopes,
+    }
+
+
+def _opencode_to_json(snap: Any) -> dict[str, Any]:
+    """Project an OpenCode ProviderSnapshot into a JSON-friendly dict.
+
+    Mirrors :func:`_kilo_to_json`: the snapshot's :class:`CapacityScope`
+    objects are flattened into plain dicts so the JSON output stays in
+    sync with the generic capacity model.
+    """
+    scopes: list[dict[str, Any]] = []
+    for scope in getattr(snap, "scopes", []) or []:
+        scopes.append(
+            {
+                "name": scope.name,
+                "kind": scope.kind,
+                "ready": scope.ready,
+                "reason": scope.reason,
+                "remaining_percent": scope.remaining_percent,
+                "remaining_amount": scope.remaining_amount,
+                "total_amount": scope.total_amount,
+                "currency": scope.currency,
+                "reset_epoch": scope.reset_epoch,
+                "resets_at": scope.resets_at,
+                "label": scope.label,
+                "source": scope.source,
+                "extras": dict(getattr(scope, "extras", {}) or {}),
+            }
+        )
+    return {
+        "provider": snap.provider,
+        "available": snap.available,
+        "reason": snap.reason,
+        "source": snap.source,
+        "selected_model": snap.selected_model,
+        "scopes": scopes,
+    }
+
+
+def _minimax_to_json(snap: Any) -> dict[str, Any]:
+    """Project a MiniMax ProviderSnapshot into a JSON-friendly dict.
+
+    Same flattening strategy as :func:`_kilo_to_json`. The snapshot's
+    :class:`CapacityScope` objects are translated to plain dicts so
+    the JSON output stays in sync with the generic capacity model.
+    """
+    scopes: list[dict[str, Any]] = []
+    for scope in getattr(snap, "scopes", []) or []:
+        scopes.append(
+            {
+                "name": scope.name,
+                "kind": scope.kind,
+                "ready": scope.ready,
+                "reason": scope.reason,
+                "remaining_percent": scope.remaining_percent,
+                "remaining_amount": scope.remaining_amount,
+                "total_amount": scope.total_amount,
+                "currency": scope.currency,
+                "reset_epoch": scope.reset_epoch,
+                "resets_at": scope.resets_at,
+                "label": scope.label,
+                "source": scope.source,
+                "extras": dict(getattr(scope, "extras", {}) or {}),
             }
         )
     return {

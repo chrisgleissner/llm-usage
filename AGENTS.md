@@ -10,10 +10,11 @@ This repo contains small Linux Python CLIs for Codex, Claude Code, GitHub Copilo
 * `llm_tools/common.py` — shared helpers (provider readers, normalization, time/reset formatting, subprocess execution, usage decisions, PTY capture, wake diagnostics, and common CLI plumbing: argument validation, run-dir logging, prompt loading, argv/JSON conversion).
 * `llm_tools/capacity.py` — generic `ProviderId`, `CapacityKind`, `CapacityScope`, `ProviderSnapshot`, and `UsageDecision` dataclasses plus the `decide`/`validate_scope`/`scope_pace` helpers. All provider-specific reader code lives outside this module.
 * `llm_tools/providers/kilo.py` — Kilo Code CLI adapter (parser for `kilo stats` output, env-var fallback, command construction).
+* `llm_tools/providers/minimax.py` — MiniMax adapter (parser for `mmx quota show --output json` output, env-var fallback, command construction).
 * Python modules: `llm_tools/usage.py`, `llm_tools/scheduler.py`, `llm_tools/ralph_robin.py`, `llm_tools/copilot_refresh.py`, and package marker `llm_tools/__init__.py`.
 * Public direct-run command files: `llm-usage`, `llm-scheduler`, `ralph-robin`.
 * Regression tests: `tests/` with pytest and fake provider commands.
-* Test helpers: `tests/conftest.py`; main suites: `tests/test_contracts.py`, `tests/test_additional_paths.py`, `tests/test_capacity.py`, `tests/test_kilo.py`, `tests/test_ralph_kilo.py`.
+* Test helpers: `tests/conftest.py`; main suites: `tests/test_contracts.py`, `tests/test_additional_paths.py`, `tests/test_capacity.py`, `tests/test_kilo.py`, `tests/test_minimax.py`, `tests/test_ralph_kilo.py`.
 * Project/package config: `pyproject.toml`.
 * Import/test bootstrap: `sitecustomize.py`.
 * CI: `.github/workflows/test.yml`.
@@ -75,7 +76,7 @@ Prefer changing the smallest relevant function surface. Preserve existing functi
 * Keep color disabled for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
 * Ralph/scheduler highlighting should default to a readable green/blue/teal palette that works on typical dark and light terminals. Keep colors centralized in `common.ANSI_COLOR_ROLES` and configurable through `LLM_TOOLS_COLOR_<ROLE>` rather than hard-coding ANSI codes at call sites.
 * Ralph/scheduler live output may use compact UTF-8 symbols to distinguish status, command, tool-call, stderr, diff hunk, and error blocks. Keep symbols centralized in `common.UTF_SYMBOL_ROLES`, configurable through `LLM_TOOLS_SYMBOL_<ROLE>`, and suppressible with `LLM_TOOLS_NO_SYMBOLS=1`.
-* Keep JSON top-level keys stable: `generated_at`, `codex`, `claude`, `copilot`, `kilo`.
+* Keep JSON top-level keys stable: `generated_at`, `codex`, `claude`, `copilot`, `kilo`, `minimax`.
 * Keep Copilot unavailable shape explicit: `available:false`, with `reason` when known.
 * Keep option semantics stable: `--show-source`, `--hide-source`, `--show-remaining-time`, `--hide-remaining-time`, `--show-codex-spark`, `--hide-codex-spark`, `--show-copilot-credits`.
 * The `--scope` flag replaces the legacy `--window` flag. `--window` is accepted as a deprecated alias and should not appear as the primary documented interface.
@@ -113,6 +114,21 @@ Tests should use the env-var fallback path (`LLM_USAGE_KILO_*`) and `LLM_USAGE_C
 * `LLM_USAGE_KILO_MONTHLY_RESET_DAY` — day of month the budget resets (default 1).
 
 Missing CLI in BYOK/local/ungated mode is `reason="missing-cli"`. Missing data in gateway mode is `reason="inconclusive-usage"`. Kilo is not forced into a fake session window; its only scope is `balance`, `budget`, or `ungated`.
+
+### MiniMax
+
+The MiniMax provider is sourced from the `mmx` CLI (run `mmx quota show --output json`). The reader tries that first and falls back to a deterministic env-var schema for tests. It picks the `general` row from the `model_remains` array (other model rows are ignored) and exposes the same 5h/weekly reset-window shape as Claude Code and Codex, so the row renders and gates identically to the other two reset-window providers. The provider is hidden entirely from the table and `--json` output when the `mmx` binary is not on PATH and no env-var fallback is present.
+
+Tests should use the env-var fallback path (`LLM_USAGE_MINIMAX_*`) and `LLM_USAGE_COPILOT_CAPTURE_TEXT`-style fixture overrides rather than live `mmx` capture. The reader tries `mmx quota show --output json` first and falls back to:
+
+* `LLM_USAGE_MINIMAX_5H_PERCENT` — remaining percent for the 5h session window (0..100).
+* `LLM_USAGE_MINIMAX_5H_RESET_EPOCH` — epoch seconds (or milliseconds) when the 5h window resets.
+* `LLM_USAGE_MINIMAX_WEEKLY_PERCENT` — remaining percent for the weekly window.
+* `LLM_USAGE_MINIMAX_WEEKLY_RESET_EPOCH` — epoch seconds (or milliseconds) when the weekly window resets.
+* `LLM_USAGE_MINIMAX_MODEL` — which `model_remains` row to read (default `general`).
+* `LLM_USAGE_MINIMAX_TIMEOUT` — `mmx quota show` timeout in seconds (default 10).
+
+Missing CLI with no env-var fallback is `reason="missing-cli"`. The provider is allowed only when at least one of the two scopes (5h, weekly) has data; the reader does not invent a fake window.
 
 ## Scheduler invariants
 

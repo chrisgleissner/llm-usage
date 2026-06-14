@@ -1,38 +1,28 @@
-"""Kilo Code CLI provider adapter.
+"""OpenCode CLI provider adapter.
 
-Kilo's governing constraints are not session windows:
+OpenCode (https://opencode.ai) is a TUI / CLI for the OpenCode AI
+agent. Like Kilo, its governing constraints are not session windows:
 
-* ``balance``  : funded credits / balance, no natural reset.
-* ``budget``   : optional monthly budget pacing with a reset.
-* ``byok`` / ``local`` / ``ungated`` : the CLI is usable but the host
-  rate limits are not the constraint.
+* ``balance``  : funded credit balance (parsed from ``opencode stats``
+  TUI output, or supplied via ``LLM_USAGE_OPENCODE_BALANCE``).
+* ``budget``   : optional monthly budget pacing
+  (``LLM_USAGE_OPENCODE_MONTHLY_BUDGET`` /
+  ``LLM_USAGE_OPENCODE_MONTHLY_SPENT``).
+* ``byok`` / ``local`` / ``ungated`` : BYOK / local model / unmetered
+  modes where OpenCode itself is the client and the host rate limits
+  are not the constraint.
 
-The reader tries three sources in order, mirroring the Codex/Claude/Copilot
-pattern of preferring real CLI output and falling back to deterministic env
-vars:
+The reader tries three sources in order, mirroring the Kilo / Codex /
+Claude pattern:
 
-1. ``kilo stats`` JSON (when the ``kilo`` binary is on PATH and emits a
-   parseable payload).
-2. ``kilo stats`` text (best-effort key/value parse for stable fields).
-3. Environment variables:
-
-   * ``LLM_USAGE_KILO_MODE`` - ``gateway`` (default), ``budget``,
-     ``byok``, ``local``, ``ungated``.
-   * ``LLM_USAGE_KILO_BALANCE`` - remaining balance (number).
-   * ``LLM_USAGE_KILO_CURRENCY`` - unit label (``GBP``/``USD``/``credits``).
-   * ``LLM_USAGE_KILO_MIN_BALANCE`` - threshold below which Kilo is
-     treated as insufficient (default ``1``).
-   * ``LLM_USAGE_KILO_MONTHLY_BUDGET`` / ``LLM_USAGE_KILO_MONTHLY_SPENT``
-     - budget pacing.
-   * ``LLM_USAGE_KILO_MONTHLY_RESET_DAY`` - day of month the budget
-     resets (default ``1``).
-
-If nothing is known and the mode is not ungated, the snapshot is
-``available=false`` with reason ``inconclusive-usage`` so callers can
-poll rather than fabricate a fake reset.
+1. ``opencode stats`` JSON (when the ``opencode`` binary is on PATH and
+   emits a parseable payload).
+2. ``opencode stats`` text (best-effort parse for the TUI-shaped
+   ``OVERVIEW`` / ``COST & TOKENS`` blocks).
+3. Environment variables for deterministic configuration and tests.
 
 The CLI's mere presence is also a hard requirement: even an ungated
-provider needs a binary to launch. ``read_kilo`` reports
+provider needs a binary to launch. ``read_opencode`` reports
 ``reason="missing-cli"`` when the binary is not on PATH.
 """
 
@@ -52,16 +42,14 @@ from .. import common
 from ..capacity import (
     CapacityKind,
     CapacityScope,
-    PROVIDER_KILO,
+    PROVIDER_OPENCODE,
     ProviderSnapshot,
     SCOPE_BALANCE,
     SCOPE_BUDGET,
-    SCOPE_BYOK,
-    SCOPE_UNGATED,
 )
 
 
-KILO_MODES = ("gateway", "budget", "byok", "local", "ungated")
+OPENCODE_MODES = ("gateway", "budget", "byok", "local", "ungated")
 DEFAULT_MIN_BALANCE = 1.0
 DEFAULT_RESET_DAY = 1
 
@@ -72,27 +60,26 @@ _UNGATED_LABEL = {
 }
 
 
-def kilo_cli(env: dict[str, str] | None = None) -> str | None:
-    """Locate the ``kilo`` binary using ``env`` (defaults to ``os.environ``).
-
-    Accepting an env parameter keeps callers deterministic in tests: the
-    host's PATH may contain an unrelated ``kilo`` install, but a test
-    fixture can still isolate itself.
+def opencode_cli(env: dict[str, str] | None = None) -> str | None:
+    """Locate the ``opencode`` binary using ``env`` (defaults to
+    ``os.environ``). Accepting an env parameter keeps callers
+    deterministic in tests: the host's PATH may contain an unrelated
+    ``opencode`` install, but a test fixture can still isolate itself.
     """
     if env is None:
         env = os.environ
-    return shutil.which("kilo", path=env.get("PATH"))
+    return shutil.which("opencode", path=env.get("PATH"))
 
 
-def kilo_mode(env: dict[str, str] | None = None) -> str:
+def opencode_mode(env: dict[str, str] | None = None) -> str:
     env = env or os.environ
-    raw = (env.get("LLM_USAGE_KILO_MODE") or "gateway").strip().lower()
-    return raw if raw in KILO_MODES else "gateway"
+    raw = (env.get("LLM_USAGE_OPENCODE_MODE") or "gateway").strip().lower()
+    return raw if raw in OPENCODE_MODES else "gateway"
 
 
-def kilo_min_balance(env: dict[str, str] | None = None) -> float:
+def opencode_min_balance(env: dict[str, str] | None = None) -> float:
     env = env or os.environ
-    raw = env.get("LLM_USAGE_KILO_MIN_BALANCE")
+    raw = env.get("LLM_USAGE_OPENCODE_MIN_BALANCE")
     if raw is None or raw == "":
         return DEFAULT_MIN_BALANCE
     try:
@@ -101,18 +88,18 @@ def kilo_min_balance(env: dict[str, str] | None = None) -> float:
         return DEFAULT_MIN_BALANCE
 
 
-def kilo_currency(env: dict[str, str] | None = None) -> str | None:
+def opencode_currency(env: dict[str, str] | None = None) -> str | None:
     env = env or os.environ
-    value = env.get("LLM_USAGE_KILO_CURRENCY")
+    value = env.get("LLM_USAGE_OPENCODE_CURRENCY")
     return value or None
 
 
-def kilo_monthly_reset_epoch(env: dict[str, str] | None = None) -> int:
+def opencode_monthly_reset_epoch(env: dict[str, str] | None = None) -> int:
     """Next monthly budget reset epoch, derived from
-    ``LLM_USAGE_KILO_MONTHLY_RESET_DAY`` (default 1)."""
+    ``LLM_USAGE_OPENCODE_MONTHLY_RESET_DAY`` (default 1)."""
     env = env or os.environ
     try:
-        day = int(env.get("LLM_USAGE_KILO_MONTHLY_RESET_DAY", str(DEFAULT_RESET_DAY)) or str(DEFAULT_RESET_DAY))
+        day = int(env.get("LLM_USAGE_OPENCODE_MONTHLY_RESET_DAY", str(DEFAULT_RESET_DAY)) or str(DEFAULT_RESET_DAY))
     except ValueError:
         day = DEFAULT_RESET_DAY
     day = max(1, min(31, day))
@@ -144,27 +131,27 @@ def _parse_balance(value: Any) -> float | None:
     text = str(value).strip()
     # Strip a leading currency/unit symbol so "£12.40" parses.
     text = re.sub(r"^[^\d\-\+]+", "", text)
+    text = re.sub(r",([0-9]{3})(?=[^0-9]|$)", r"\1", text)
     try:
         return float(text)
     except ValueError:
         return None
 
 
-def _parse_kilo_stats_payload(payload: Any) -> dict[str, Any] | None:
-    """Pull a small, stable subset of fields out of a ``kilo stats`` payload.
-
-    We intentionally accept a narrow vocabulary so a stat dump that changes
-    shape tomorrow does not silently feed garbage into the budget model. A
-    payload that does not match any known shape is returned as ``None`` and
-    the reader falls back to env vars.
+def _parse_opencode_stats_payload(payload: Any) -> dict[str, Any] | None:
+    """Pull a small, stable subset of fields out of an ``opencode stats``
+    JSON payload. We intentionally accept a narrow vocabulary so a stats
+    dump that changes shape tomorrow does not silently feed garbage into
+    the budget model. A payload that does not match any known shape is
+    returned as ``None``.
     """
     if not isinstance(payload, dict):
         return None
     out: dict[str, Any] = {}
-    balance = _first(payload, ("balance", "credits", "remaining", "remaining_credits", "available_balance"))
-    if balance is not None:
-        out["balance"] = _parse_balance(balance)
-    currency = _first(payload, ("currency", "unit", "balance_currency", "credits_unit"))
+    cost = _first(payload, ("cost", "total_cost", "totalCost", "spend", "spent"))
+    if cost is not None:
+        out["cost"] = _parse_balance(cost)
+    currency = _first(payload, ("currency", "unit", "cost_currency"))
     if currency:
         out["currency"] = str(currency)
     budget = _first(payload, ("budget", "monthly_budget", "monthlyBudget", "budget_total"))
@@ -178,84 +165,78 @@ def _parse_kilo_stats_payload(payload: Any) -> dict[str, Any] | None:
     return out
 
 
-def _parse_kilo_stats_text(text: str) -> dict[str, Any] | None:
-    """Best-effort line parser for the human-readable ``kilo stats`` output.
-
-    The default output is a TUI-shaped layout with two blocks
-    (``OVERVIEW`` and ``COST & TOKENS``); each row is
-    ``│Key                  Value unit│``. We accept that shape, the
-    legacy ``key: value`` / ``key = value`` line format, and a small
-    set of long-form ``field: number [unit]`` lines. A trailing
-    currency/unit token (e.g. ``balance: 7.50 GBP``) is folded into the
-    parsed value. Anything unrecognised is ignored.
+def _parse_opencode_stats_text(text: str) -> dict[str, Any] | None:
+    """Best-effort line parser for the human-readable ``opencode stats``
+    output. The default output is a TUI-shaped layout with two blocks
+    (``OVERVIEW`` and ``COST & TOKENS``); each line is
+    ``key value unit``. We pick out the small set of fields we care
+    about and ignore anything else.
     """
     if not text:
         return None
     out: dict[str, Any] = {}
-    # TUI-boxed rows: ``│Total Cost                  $7.50│``. The currency
-    # symbol may prefix the number ("$7.50") or follow it ("7.50 USD");
-    # we capture the raw cell (which may include a trailing │) and
-    # post-process it.
-    tui_patterns = (
+    patterns = (
+        # Allow leading TUI box-drawing characters (│) that wrap each
+        # line in the default ``opencode stats`` output, e.g.
+        # "│Total Cost                  $7.50│". The currency symbol may
+        # prefix the number ("$7.50") or follow it ("7.50 USD").
+        # We capture the raw cell (which may include a trailing │)
+        # and post-process it in :func:`_parse_value_cell`.
         (re.compile(r"^\s*│?\s*Total Cost\s+(\S+(?:\s+\S+)?)\s*│?\s*$", re.I | re.M), ("cost", "currency")),
         (re.compile(r"^\s*│?\s*Avg Cost/Day\s+(\S+(?:\s+\S+)?)\s*│?\s*$", re.I | re.M), ("avg_cost_per_day", "currency")),
-        (re.compile(r"^\s*│?\s*Balance\s+(\S+(?:\s+\S+)?)\s*│?\s*$", re.I | re.M), ("balance", "currency")),
-        (re.compile(r"^\s*│?\s*Credits\s+(\S+(?:\s+\S+)?)\s*│?\s*$", re.I | re.M), ("balance", "currency")),
-        (re.compile(r"^\s*│?\s*Monthly Budget\s+(\S+(?:\s+\S+)?)\s*│?\s*$", re.I | re.M), ("budget", "currency")),
-        (re.compile(r"^\s*│?\s*Monthly Spent\s+(\S+(?:\s+\S+)?)\s*│?\s*$", re.I | re.M), ("spent", "currency")),
+        (re.compile(r"^\s*│?\s*Sessions\s+(\S+?)\s*│?\s*$", re.I | re.M), ("sessions", None)),
+        (re.compile(r"^\s*│?\s*Days\s+(\S+?)\s*│?\s*$", re.I | re.M), ("days", None)),
+        (re.compile(r"^\s*│?\s*Input\s+(\S+?)\s*│?\s*$", re.I | re.M), ("input_tokens", None)),
+        (re.compile(r"^\s*│?\s*Output\s+(\S+?)\s*│?\s*$", re.I | re.M), ("output_tokens", None)),
+        (re.compile(r"^\s*│?\s*Cache Read\s+(\S+?)\s*│?\s*$", re.I | re.M), ("cache_read_tokens", None)),
+        (re.compile(r"^\s*│?\s*Cache Write\s+(\S+?)\s*│?\s*$", re.I | re.M), ("cache_write_tokens", None)),
     )
-    for regex, keys in tui_patterns:
+    for regex, keys in patterns:
         match = regex.search(text)
         if not match:
             continue
         value_key, extra_key = keys
-        if value_key in out:
-            continue
-        raw_cell = match.group(1).strip().rstrip("│").rstrip()
+        raw_cell = match.group(1).strip()
+        # Strip any trailing TUI box-drawing char (│).
+        raw_cell = raw_cell.rstrip("│").rstrip()
+        # Try to split a trailing currency/unit token off the value.
+        # e.g. "7.50 USD" → ("7.50", "USD"); "$7.50" → ("7.50", "$");
+        # "7.50" → ("7.50", None).
         m = re.match(r"^([\$€£]?)([0-9][0-9.,]*)\s*([A-Za-z€£$]+)?$", raw_cell)
         if m:
             prefix, value, suffix = m.group(1), m.group(2), m.group(3)
             parsed = _parse_balance(value)
-            if parsed is not None:
+            if parsed is not None and value_key not in out:
                 out[value_key] = parsed
             currency = prefix or suffix
             if extra_key and currency and extra_key not in out:
                 out[extra_key] = currency
         else:
             parsed = _parse_balance(raw_cell)
-            if parsed is not None:
+            if parsed is not None and value_key not in out:
                 out[value_key] = parsed
-
-    patterns = (
-        (re.compile(r"balance[:=]\s*([0-9]+(?:\.[0-9]+)?)(?:\s+([A-Za-z€£$]+))?", re.I), ("balance", "currency")),
-        (re.compile(r"\bcredits?[:=]\s*([0-9]+(?:\.[0-9]+)?)(?:\s+([A-Za-z€£$]+))?", re.I), ("balance", "currency")),
-        (re.compile(r"currency[:=]\s*([^\s,;]+)", re.I), ("currency", None)),
-        (re.compile(r"\bunit[:=]\s*([^\s,;]+)", re.I), ("currency", None)),
-        (re.compile(r"budget[:=]\s*([0-9]+(?:\.[0-9]+)?)", re.I), ("budget", None)),
-        (re.compile(r"monthly[_\s-]?budget[:=]\s*([0-9]+(?:\.[0-9]+)?)", re.I), ("budget", None)),
-        (re.compile(r"spent[:=]\s*([0-9]+(?:\.[0-9]+)?)", re.I), ("spent", None)),
-        (re.compile(r"monthly[_\s-]?spent[:=]\s*([0-9]+(?:\.[0-9]+)?)", re.I), ("spent", None)),
-    )
+    # Tolerant line-based parser as a fallback for future renames.
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
-        for regex, keys in patterns:
-            match = regex.search(line)
-            if not match:
+        for pattern, (value_key, extra_key) in (
+            (r"balance[:=]\s*([0-9]+(?:\.[0-9]+)?)(?:\s+([A-Za-z€£$]+))?", ("balance", "currency")),
+            (r"currency[:=]\s*([^\s,;]+)", ("currency", None)),
+            (r"budget[:=]\s*([0-9]+(?:\.[0-9]+)?)", ("budget", None)),
+            (r"monthly[_\s-]?budget[:=]\s*([0-9]+(?:\.[0-9]+)?)", ("budget", None)),
+            (r"spent[:=]\s*([0-9]+(?:\.[0-9]+)?)", ("spent", None)),
+            (r"monthly[_\s-]?spent[:=]\s*([0-9]+(?:\.[0-9]+)?)", ("spent", None)),
+        ):
+            m = re.search(pattern, line, re.I)
+            if not m:
                 continue
-            value = match.group(1).strip().rstrip(",;")
-            value_key, extra_key = keys
-            if value_key in ("balance", "budget", "spent"):
-                if value_key not in out:
-                    parsed = _parse_balance(value)
-                    if parsed is not None:
-                        out[value_key] = parsed
-            else:
-                if value_key not in out:
-                    out[value_key] = value
-            if extra_key and match.group(2) and extra_key not in out:
-                out[extra_key] = match.group(2).strip()
+            v = m.group(1).strip()
+            parsed = _parse_balance(v)
+            if parsed is not None and value_key not in out:
+                out[value_key] = parsed
+            if extra_key and m.group(2):
+                out[extra_key] = m.group(2).strip()
             break
     return out or None
 
@@ -267,8 +248,8 @@ def _first(obj: dict[str, Any], keys: tuple[str, ...]) -> Any:
     return None
 
 
-def _run_kilo_stats(env: dict[str, str]) -> dict[str, Any] | None:
-    cli = kilo_cli(env)
+def _run_opencode_stats(env: dict[str, str]) -> dict[str, Any] | None:
+    cli = opencode_cli(env)
     if not cli:
         return None
     try:
@@ -277,28 +258,30 @@ def _run_kilo_stats(env: dict[str, str]) -> dict[str, Any] | None:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=int(env.get("LLM_USAGE_KILO_TIMEOUT", "10") or "10"),
+            timeout=int(env.get("LLM_USAGE_OPENCODE_TIMEOUT", "10") or "10"),
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if proc.returncode != 0 or not proc.stdout:
+    if not proc.stdout:
         return None
     text = proc.stdout.strip()
+    if not text:
+        return None
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
-        return _parse_kilo_stats_text(text)
-    return _parse_kilo_stats_payload(payload)
+        return _parse_opencode_stats_text(text)
+    return _parse_opencode_stats_payload(payload)
 
 
 def _balance_from_env(env: dict[str, str]) -> float | None:
-    return _parse_balance(env.get("LLM_USAGE_KILO_BALANCE"))
+    return _parse_balance(env.get("LLM_USAGE_OPENCODE_BALANCE"))
 
 
 def _budget_from_env(env: dict[str, str]) -> tuple[float | None, float | None]:
-    budget = _parse_balance(env.get("LLM_USAGE_KILO_MONTHLY_BUDGET"))
-    spent = _parse_balance(env.get("LLM_USAGE_KILO_MONTHLY_SPENT"))
+    budget = _parse_balance(env.get("LLM_USAGE_OPENCODE_MONTHLY_BUDGET"))
+    spent = _parse_balance(env.get("LLM_USAGE_OPENCODE_MONTHLY_SPENT"))
     return budget, spent
 
 
@@ -314,9 +297,9 @@ def _scopes_for_mode(
 ) -> list[CapacityScope]:
     scopes: list[CapacityScope] = []
     source_parts: list[str] = []
-    stats = _run_kilo_stats(env)
+    stats = _run_opencode_stats(env)
     if stats is not None:
-        source_parts.append("kilo stats")
+        source_parts.append("opencode stats")
         if balance is None and stats.get("balance") is not None:
             balance = stats["balance"]
         if currency is None and stats.get("currency"):
@@ -325,13 +308,18 @@ def _scopes_for_mode(
             budget_total = stats["budget"]
         if budget_spent is None and stats.get("spent") is not None:
             budget_spent = stats["spent"]
-
-    # Always add the explicit env-vars source if anything was set, to make
-    # tests easy to read.
-    if any(env.get(k) for k in ("LLM_USAGE_KILO_BALANCE", "LLM_USAGE_KILO_CURRENCY", "LLM_USAGE_KILO_MONTHLY_BUDGET", "LLM_USAGE_KILO_MONTHLY_SPENT")):
+    if any(
+        env.get(k)
+        for k in (
+            "LLM_USAGE_OPENCODE_BALANCE",
+            "LLM_USAGE_OPENCODE_CURRENCY",
+            "LLM_USAGE_OPENCODE_MONTHLY_BUDGET",
+            "LLM_USAGE_OPENCODE_MONTHLY_SPENT",
+        )
+    ):
         source_parts.append("env")
     if not source_parts:
-        source_parts.append("kilo cli")
+        source_parts.append("opencode cli")
     source = " + ".join(source_parts)
 
     if mode in ("byok", "local", "ungated"):
@@ -344,7 +332,7 @@ def _scopes_for_mode(
                 reason=mode,
                 label=label,
                 source=source,
-                extras={"mode": mode, "cli": kilo_cli(env) or ""},
+                extras={"mode": mode, "cli": opencode_cli(env) or ""},
             )
         )
         return scopes
@@ -380,7 +368,7 @@ def _scopes_for_mode(
             )
         )
 
-    # If ``kilo stats`` reported a cost but we have no configured
+    # If ``opencode stats`` reported a cost but we have no configured
     # balance or budget, surface the cost as a spent row so the user
     # sees real numbers in the table instead of ``inconclusive-usage``.
     cost = stats.get("cost") if stats else None
@@ -414,14 +402,14 @@ def _scopes_for_mode(
     return scopes
 
 
-def read_kilo(env: dict[str, str] | None = None) -> ProviderSnapshot:
+def read_opencode(env: dict[str, str] | None = None) -> ProviderSnapshot:
     env = env or os.environ
-    cli = kilo_cli(env)
-    mode = kilo_mode(env)
+    cli = opencode_cli(env)
+    mode = opencode_mode(env)
     balance = _balance_from_env(env)
-    currency = kilo_currency(env)
+    currency = opencode_currency(env)
     budget_total, budget_spent = _budget_from_env(env)
-    reset_epoch = kilo_monthly_reset_epoch(env)
+    reset_epoch = opencode_monthly_reset_epoch(env)
     scopes = _scopes_for_mode(
         mode,
         balance=balance,
@@ -435,16 +423,16 @@ def read_kilo(env: dict[str, str] | None = None) -> ProviderSnapshot:
     if mode in ("byok", "local", "ungated"):
         if not cli:
             return ProviderSnapshot(
-                provider=PROVIDER_KILO,
+                provider=PROVIDER_OPENCODE,
                 available=False,
                 reason="missing-cli",
-                source="kilo cli",
+                source="opencode cli",
                 scopes=scopes,
             )
         return ProviderSnapshot(
-            provider=PROVIDER_KILO,
+            provider=PROVIDER_OPENCODE,
             available=True,
-            source=scopes[0].source if scopes else "kilo cli",
+            source=scopes[0].source if scopes else "opencode cli",
             selected_model=None,
             scopes=scopes,
         )
@@ -456,62 +444,65 @@ def read_kilo(env: dict[str, str] | None = None) -> ProviderSnapshot:
     has_data = any(s.kind != CapacityKind.UNKNOWN for s in scopes)
     if not has_data:
         return ProviderSnapshot(
-            provider=PROVIDER_KILO,
+            provider=PROVIDER_OPENCODE,
             available=False,
             reason="inconclusive-usage",
-            source=scopes[0].source if scopes else "kilo cli",
+            source=scopes[0].source if scopes else "opencode cli",
             scopes=scopes,
         )
     has_env_data = bool(
-        env.get("LLM_USAGE_KILO_BALANCE")
-        or env.get("LLM_USAGE_KILO_MONTHLY_BUDGET")
+        env.get("LLM_USAGE_OPENCODE_BALANCE")
+        or env.get("LLM_USAGE_OPENCODE_MONTHLY_BUDGET")
     )
     if not cli and not has_env_data and mode != "ungated":
         return ProviderSnapshot(
-            provider=PROVIDER_KILO,
+            provider=PROVIDER_OPENCODE,
             available=False,
             reason="missing-cli",
-            source=scopes[0].source if scopes else "kilo cli",
+            source=scopes[0].source if scopes else "opencode cli",
             scopes=scopes,
         )
     return ProviderSnapshot(
-        provider=PROVIDER_KILO,
+        provider=PROVIDER_OPENCODE,
         available=True,
-        source=scopes[0].source if scopes else "kilo cli",
+        source=scopes[0].source if scopes else "opencode cli",
         selected_model=None,
         scopes=scopes,
     )
 
 
-def kilo_command_argv(cfg_attached: bool, cwd: str, prompt: str) -> list[str]:
-    """Build the default argv for launching Kilo.
+def opencode_command_argv(cfg_attached: bool, cwd: str, prompt: str) -> list[str]:
+    """Build the default argv for launching OpenCode.
 
-    Attached/interactive: ``kilo run <prompt>`` (run from --cwd).
-    Headless/autonomous: ``kilo run --auto <prompt>``.
+    Attached/interactive: ``opencode -C <cwd>`` (or no -C, the opencode
+    CLI defaults to the current directory).
+    Headless/autonomous: ``opencode run <prompt>`` with ``-C <cwd>`` so
+    the agent works in the configured directory.
     """
-    base = ["kilo", "run"]
-    if not cfg_attached:
-        base.append("--auto")
-    return [*base, prompt]
+    if cfg_attached:
+        # Interactive TUI mode: opencode picks up the cwd from the
+        # process, but we set it explicitly via the subprocess cwd.
+        return ["opencode"]
+    return ["opencode", "run", "-C", cwd, prompt]
 
 
 __all__ = [
-    "KILO_MODES",
-    "kilo_cli",
-    "kilo_command_argv",
-    "kilo_currency",
-    "kilo_min_balance",
-    "kilo_mode",
-    "kilo_monthly_reset_epoch",
+    "OPENCODE_MODES",
+    "opencode_cli",
+    "opencode_command_argv",
+    "opencode_currency",
+    "opencode_min_balance",
+    "opencode_mode",
+    "opencode_monthly_reset_epoch",
     "read",
-    "read_kilo",
+    "read_opencode",
 ]
 
 
 def read(env: dict[str, str] | None = None) -> ProviderSnapshot:
-    """Consistent with the other provider modules: ``read(env)`` returns a
-    :class:`ProviderSnapshot`. The actual implementation lives in
-    :func:`read_kilo`; this is the public name used by
+    """Consistent with the other provider modules: ``read(env)`` returns
+    a :class:`ProviderSnapshot`. The actual implementation lives in
+    :func:`read_opencode`; this is the public name used by
     :mod:`llm_tools.providers` callers.
     """
-    return read_kilo(env)
+    return read_opencode(env)

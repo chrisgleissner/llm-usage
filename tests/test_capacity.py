@@ -45,6 +45,8 @@ def test_validate_scope_rejects_unsupported_provider_scope() -> None:
         validate_scope("kilo", "5h")
     with pytest.raises(ValueError, match="not valid for codex"):
         validate_scope("codex", "balance")
+    with pytest.raises(ValueError, match="not valid for minimax"):
+        validate_scope("minimax", "balance")
 
 
 def test_validate_scope_accepts_provider_specific() -> None:
@@ -55,6 +57,9 @@ def test_validate_scope_accepts_provider_specific() -> None:
     assert validate_scope("kilo", "budget") == "budget"
     assert validate_scope("kilo", "byok") == "byok"
     assert validate_scope("kilo", "ungated") == "ungated"
+    assert validate_scope("minimax", "auto") == "auto"
+    assert validate_scope("minimax", "5h") == "5h"
+    assert validate_scope("minimax", "weekly") == "weekly"
 
 
 def test_valid_scopes_for_provider() -> None:
@@ -64,6 +69,9 @@ def test_valid_scopes_for_provider() -> None:
     assert SCOPE_MONTHLY in valid_scopes_for_provider("copilot")
     assert SCOPE_BALANCE in valid_scopes_for_provider("kilo")
     assert SCOPE_BUDGET in valid_scopes_for_provider("kilo")
+    assert SCOPE_5H in valid_scopes_for_provider("minimax")
+    assert SCOPE_WEEKLY in valid_scopes_for_provider("minimax")
+    assert SCOPE_BALANCE not in valid_scopes_for_provider("minimax")
 
 
 def test_effective_scopes_auto_returns_all() -> None:
