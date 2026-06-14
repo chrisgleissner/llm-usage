@@ -165,6 +165,84 @@ def test_codex_snapshot_uses_env_home_without_monkeypatch(env: dict[str, str]) -
     assert raw["five_hour"]["used"] == 0.0
 
 
+CODEX_RATE_LIMITS_PAYLOAD = (
+    '{"rateLimits":{"limitId":"codex","planType":"pro",'
+    '"primary":{"usedPercent":20,"windowDurationMins":300,"resetsAt":5000},'
+    '"secondary":{"usedPercent":84,"windowDurationMins":10080,"resetsAt":9000}},'
+    '"rateLimitsByLimitId":{'
+    '"codex":{"primary":{"usedPercent":20,"resetsAt":5000},"secondary":{"usedPercent":84,"resetsAt":9000}},'
+    '"codex_bengalfox":{"limitName":"GPT-5.3-Codex-Spark",'
+    '"primary":{"usedPercent":3,"resetsAt":5000},"secondary":{"usedPercent":7,"resetsAt":9000}}}}'
+)
+
+
+def test_codex_active_refresh_overrides_stale_local_snapshot(env: dict[str, str]) -> None:
+    """The app-server payload is fresh, so an old local file never wins."""
+    home = Path(env["HOME"])
+    path = home / ".codex" / "sessions" / "stale.jsonl"
+    path.write_text(
+        '{"rate_limits":{"primary":{"used_percent":99,"resets_at":5000}}}\n',
+        encoding="utf-8",
+    )
+    os.utime(path, (1000, 1000))
+    live_env = env | {
+        "LLM_USAGE_NOW_EPOCH": "2000",
+        "LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE": "60",
+        "LLM_USAGE_CODEX_RATE_LIMITS_JSON": CODEX_RATE_LIMITS_PAYLOAD,
+    }
+    raw = codex.read_codex(live_env)
+    assert raw is not None
+    assert raw.get("available") is not False
+    assert raw["source"] == "codex app-server"
+    assert raw["five_hour"]["used"] == 20.0
+    assert raw["plan"] == "pro"
+    keys = {row["key"] for row in raw["rows"]}
+    assert keys == {"codex", "codex-spark"}
+    snap = codex.read(live_env)
+    assert snap.available is True
+    assert {s.name for s in snap.scopes} == {"5h", "weekly"}
+
+
+def test_codex_active_refresh_reports_not_authenticated(env: dict[str, str], fake_bin: Path) -> None:
+    """A CLI on PATH but no credentials surfaces an auth reason, not stale data."""
+    from .conftest import write_exe
+
+    write_exe(fake_bin / "codex", "#!/usr/bin/env bash\nexit 0\n")
+    live_env = {k: v for k, v in env.items() if k != "LLM_USAGE_DISABLE_CODEX_APP_SERVER"}
+    api = common.read_codex_api(live_env)
+    assert api == {
+        "provider": "codex",
+        "source": "codex app-server",
+        "available": False,
+        "reason": "not-authenticated",
+    }
+    snap = codex.read(live_env)
+    assert snap.available is False
+    assert snap.reason == "not-authenticated"
+
+
+def test_codex_active_refresh_reports_missing_cli(env: dict[str, str], fake_bin: Path) -> None:
+    """No codex binary on PATH is a startup problem, surfaced as missing-cli."""
+    live_env = {k: v for k, v in env.items() if k != "LLM_USAGE_DISABLE_CODEX_APP_SERVER"}
+    live_env["PATH"] = str(fake_bin)  # fake_bin has no codex
+    api = common.read_codex_api(live_env)
+    assert api is not None
+    assert api["available"] is False
+    assert api["reason"] == "missing-cli"
+
+
+def test_codex_api_falls_back_to_fresh_cache_on_transient_failure(env: dict[str, str]) -> None:
+    """A transient app-server failure serves the most recent cached payload."""
+    cache = common.usage_cache_dir(env) / "codex-usage-api.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(CODEX_RATE_LIMITS_PAYLOAD + "\n", encoding="utf-8")
+    # Disable flag (set by the fixture) makes the live read a transient miss.
+    raw = common.read_codex_api(env)
+    assert raw is not None
+    assert raw["five_hour"]["used"] == 20.0
+    assert raw["source"] == "codex app-server (cached)"
+
+
 def test_claude_snapshot_unavailable_when_no_data(env: dict[str, str], monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(env["HOME"]))
     env["LLM_USAGE_NOW_EPOCH"] = "1000"
@@ -216,3 +294,49 @@ def test_minimax_snapshot_uses_env(env: dict[str, str]) -> None:
     for scope in snap.scopes:
         assert scope.kind == CapacityKind.RESET_WINDOW
         assert scope.remaining_percent is not None
+
+
+def test_progress_reporter_is_silent_when_disabled() -> None:
+    import io
+
+    buf = io.StringIO()
+    reporter = usage.ProgressReporter(enabled=False, stream=buf)
+    reporter.start()
+    reporter.begin(6)
+    reporter.advance()
+    reporter.stop()
+    assert buf.getvalue() == ""
+
+
+def test_progress_reporter_animates_then_erases() -> None:
+    import io
+
+    buf = io.StringIO()
+    reporter = usage.ProgressReporter(enabled=True, stream=buf, interval=0.01)
+    reporter.start()
+    reporter.begin(6)
+    for _ in range(6):
+        reporter.advance()
+    time.sleep(0.05)
+    reporter.stop()
+    output = buf.getvalue()
+    assert "refreshing usage" in output
+    assert "6/6" in output
+    # The line is fully erased on stop, leaving the terminal untouched.
+    assert output.endswith("\r\033[K")
+
+
+def test_progress_reporter_ascii_frames_without_symbols() -> None:
+    import io
+
+    buf = io.StringIO()
+    reporter = usage.ProgressReporter(enabled=True, stream=buf, symbols=False, interval=0.01)
+    reporter.start()
+    reporter.begin(1)
+    reporter.advance()
+    time.sleep(0.03)
+    reporter.stop()
+    output = buf.getvalue()
+    assert any(frame in output for frame in usage.ProgressReporter.FRAMES_ASCII)
+    # No braille frames leak through when symbols are disabled.
+    assert not any(frame in output for frame in usage.ProgressReporter.FRAMES_UNICODE)

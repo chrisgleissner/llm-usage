@@ -5,8 +5,9 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -78,6 +79,15 @@ class Config:
         self.provider_parallelism = provider_parallelism(env)
         self.symbols_enabled = env.get("LLM_TOOLS_NO_SYMBOLS", "0") != "1"
         self.color_enabled = sys.stdout.isatty() and not env.get("LLM_USAGE_NO_COLOR") and env.get("TERM") != "dumb"
+        # The progress indicator is purely stderr-side feedback while readers
+        # query their (sometimes slow) providers. It is gated on stderr being a
+        # TTY so it never leaks into pipes, batch scripts, or non-interactive
+        # sessions (telnet without a PTY, cron, CI) — there it stays silent.
+        self.progress_enabled = (
+            sys.stderr.isatty()
+            and env.get("TERM") != "dumb"
+            and env.get("LLM_USAGE_NO_PROGRESS", "0") != "1"
+        )
         self.terminal_width = terminal_width(env)
 
 
@@ -966,6 +976,88 @@ def unavailable_snapshot(provider: str, source: str, reason: str = "reader-error
     return ProviderSnapshot(provider=provider, available=False, reason=reason, source=source)
 
 
+class ProgressReporter:
+    """Ephemeral, single-line progress feedback for slow provider reads.
+
+    Renders an animated spinner plus a completed/total counter to ``stderr``
+    and erases itself entirely once the data is ready, leaving the terminal
+    exactly as it was. It is a no-op when ``enabled`` is false (non-TTY stderr),
+    so JSON output, pipes, and batch scripts stay byte-clean.
+    """
+
+    FRAMES_UNICODE = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    FRAMES_ASCII = ("|", "/", "-", "\\")
+
+    def __init__(
+        self,
+        enabled: bool,
+        symbols: bool = True,
+        stream: Any = None,
+        label: str = "refreshing usage",
+        interval: float = 0.1,
+    ) -> None:
+        self.enabled = enabled
+        self.stream = stream if stream is not None else sys.stderr
+        self.label = label
+        self.interval = interval
+        self.frames = self.FRAMES_UNICODE if symbols else self.FRAMES_ASCII
+        self._total = 0
+        self._done = 0
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def begin(self, total: int) -> None:
+        with self._lock:
+            self._total = total
+
+    def advance(self, step: int = 1) -> None:
+        with self._lock:
+            self._done += step
+
+    def start(self) -> None:
+        if not self.enabled or self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        self._render(self.frames[0])
+        index = 0
+        while not self._stop.wait(self.interval):
+            index += 1
+            self._render(self.frames[index % len(self.frames)])
+
+    def _render(self, frame: str) -> None:
+        with self._lock:
+            done, total = self._done, self._total
+        count = f" {done}/{total}" if total else ""
+        try:
+            self.stream.write(f"\r\033[K{frame} {self.label}{count}")
+            self.stream.flush()
+        except (OSError, ValueError):
+            pass
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(timeout=1)
+        self._thread = None
+        try:
+            self.stream.write("\r\033[K")
+            self.stream.flush()
+        except (OSError, ValueError):
+            pass
+
+    def __enter__(self) -> "ProgressReporter":
+        self.start()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.stop()
+
+
 def read_provider(name: str, reader: Any, fallback: Any) -> Any:
     try:
         return reader()
@@ -973,7 +1065,7 @@ def read_provider(name: str, reader: Any, fallback: Any) -> Any:
         return fallback() if callable(fallback) else fallback
 
 
-def read_all_provider_data(cfg: Config) -> dict[str, Any]:
+def read_all_provider_data(cfg: Config, progress: "ProgressReporter | None" = None) -> dict[str, Any]:
     from .providers import (
         read_claude_snapshot,
         read_copilot_snapshot,
@@ -1008,21 +1100,38 @@ def read_all_provider_data(cfg: Config) -> dict[str, Any]:
             lambda: unavailable_snapshot("minimax", "mmx cli"),
         ),
     }
+    if progress is not None:
+        progress.begin(len(readers))
     if cfg.provider_parallelism <= 1:
-        return {name: read_provider(name, reader, fallback) for name, (reader, fallback) in readers.items()}
-    out: dict[str, Any] = {}
+        out = {}
+        for name, (reader, fallback) in readers.items():
+            out[name] = read_provider(name, reader, fallback)
+            if progress is not None:
+                progress.advance()
+        return out
+    out = {}
     with ThreadPoolExecutor(max_workers=cfg.provider_parallelism) as pool:
         futures = {
-            name: pool.submit(read_provider, name, reader, fallback)
+            pool.submit(read_provider, name, reader, fallback): name
             for name, (reader, fallback) in readers.items()
         }
-        for name in readers:
-            out[name] = futures[name].result()
+        for future in as_completed(futures):
+            out[futures[future]] = future.result()
+            if progress is not None:
+                progress.advance()
     return out
 
 
 def render_once(cfg: Config) -> None:
-    provider_data = read_all_provider_data(cfg)
+    progress = ProgressReporter(
+        enabled=cfg.progress_enabled and not cfg.log_only,
+        symbols=cfg.symbols_enabled,
+    )
+    progress.start()
+    try:
+        provider_data = read_all_provider_data(cfg, progress=progress)
+    finally:
+        progress.stop()
     codex_legacy = provider_data["codex"]
     claude_snap = provider_data["claude"]
     copilot_snap = provider_data["copilot"]

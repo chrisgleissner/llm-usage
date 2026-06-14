@@ -780,6 +780,9 @@ def test_prune_usage_log(env: dict[str, str]) -> None:
 
 def test_common_filesystem_provider_paths(env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", env["HOME"])
+    # This path exercises the local-filesystem fallback readers, so keep Codex
+    # from spawning the real app-server (it reads os.environ, not the fixture).
+    monkeypatch.setenv("LLM_USAGE_DISABLE_CODEX_APP_SERVER", "1")
     home = Path(env["HOME"])
     assert common.latest_matching_line(tmp_path / "missing", lambda _o: True, env) is None
     bad = tmp_path / "bad.jsonl"
