@@ -100,6 +100,18 @@ def test_decide_unavailable_snapshot() -> None:
     assert d.wait_until is not None
 
 
+def test_decide_unavailable_snapshot_vetoes_even_with_scopes() -> None:
+    snap = _snap(
+        CapacityScope(name="ungated", kind=CapacityKind.UNGATED, label="byok"),
+        available=False,
+        reason="missing-cli",
+    )
+    d = decide(snap, "auto", 1.0, 1.0, 60)
+    assert d.usable is False
+    assert d.reason == "missing-cli"
+    assert [scope.name for scope in d.scopes] == ["ungated"]
+
+
 def test_decide_missing_cli() -> None:
     snap = _snap(
         CapacityScope(name="balance", kind=CapacityKind.BALANCE, remaining_amount=10.0, currency="GBP")

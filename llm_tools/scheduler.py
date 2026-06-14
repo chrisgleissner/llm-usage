@@ -365,9 +365,9 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
         if cfg.tool == "claude":
             return ["claude", prompt]
         if cfg.tool == "kilo":
-            return ["kilo", "run", "-C", cfg.cwd, prompt]
+            return ["kilo", "run", prompt]
         if cfg.tool == "opencode":
-            return ["opencode", "-C", cfg.cwd]
+            return ["opencode"]
         if cfg.tool == "minimax":
             return ["mmx"]
         return ["copilot", "-C", cfg.cwd, "-i", prompt]
@@ -378,7 +378,7 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
             return ["claude", "--print", "--output-format", "stream-json", "--verbose", prompt]
         return ["claude", "--print", prompt]
     if cfg.tool == "kilo":
-        return ["kilo", "run", "--auto", "-C", cfg.cwd, prompt]
+        return ["kilo", "run", "--auto", prompt]
     if cfg.tool == "opencode":
         return ["opencode", "run", "-C", cfg.cwd, prompt]
     if cfg.tool == "minimax":

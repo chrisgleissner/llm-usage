@@ -518,6 +518,9 @@ def test_parser_option_coverage(tmp_path: Path) -> None:
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="claude"), "p") == ["claude", "--print", "p"]
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="claude", claude_stream_json=True), "p") == ["claude", "--print", "--output-format", "stream-json", "--verbose", "p"]
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="copilot", cwd="/c", attached=True), "p") == ["copilot", "-C", "/c", "-i", "p"]
+    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="kilo", cwd="/c", attached=True), "p") == ["kilo", "run", "p"]
+    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="kilo", cwd="/c"), "p") == ["kilo", "run", "--auto", "p"]
+    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="opencode", cwd="/c", attached=True), "p") == ["opencode"]
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(tool="codex")).startswith("Codex")
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(tool="claude")).startswith("Claude")
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(tool="copilot")).startswith("GitHub")

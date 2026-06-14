@@ -233,13 +233,13 @@ def decide(
     now = _now(env)
     poll = max(1, int(poll_interval))
 
-    if not snapshot.available and not snapshot.scopes:
+    if not snapshot.available:
         return UsageDecision(
             tool=snapshot.provider,
             usable=False,
             reason=snapshot.reason or "unavailable",
             wait_until=now + poll,
-            scopes=[],
+            scopes=list(snapshot.scopes),
         )
 
     if not cli_present:

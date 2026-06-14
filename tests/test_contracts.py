@@ -116,8 +116,9 @@ def test_usage_json_table_statusline_and_cache(env: dict[str, str]) -> None:
     assert "Pace" not in table.stdout
     assert "Pace / Gate" not in table.stdout
     # "opencode" is allowed; the legacy assertion is that the table never
-    # uses the words "open" or "closed" (left over from a removed dial UI).
-    assert "opencode" not in table.stdout or "opencode" in table.stdout
+    # uses the standalone words "open" or "closed" (left over from a
+    # removed dial UI).
+    assert not re.search(r"\bopen\b", table.stdout, re.IGNORECASE)
     assert "closed" not in table.stdout
     assert "Use" not in table.stdout.splitlines()[4]
     hidden = run_cmd(["./llm-usage", "--hide-codex-spark"], env)
