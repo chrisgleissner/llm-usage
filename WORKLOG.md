@@ -135,3 +135,32 @@ llm-scheduler worklog
   the balance scope and emits a `usage_decision` event.
 - `ralph-robin --tools kilo --max-iterations 1` selects kilo, runs
   the provider, and stops cleanly.
+
+## 2026-06-14 — OpenCode support added + handover prompt
+
+- Added `llm_tools/providers/opencode.py` as a Kilo-shaped adapter for
+  the OpenCode CLI (`opencode stats` JSON + text + env-var fallback,
+  same `read()` / `read_opencode()` / `command_argv` contract).
+- Wired OpenCode into `llm_tools/capacity.py` (PROVIDER_OPENCODE +
+  allow-list), `llm_tools/common.py` (snapshot shim), `usage.py`
+  (opencode_rows + JSON), `scheduler.py` (--tool opencode, default
+  argv), `ralph_robin.py` (--tools opencode), and `providers/__init__.py`.
+- Added 26 tests in `tests/test_opencode.py`. 2 still fail on
+  `PATH=/var/empty` + gateway+balance: the reader returns
+  `missing-cli` because the binary is required to launch in any mode.
+  This mirrors the Kilo behavior (kilo's test happens to pass because
+  the host has a real kilo on PATH). To be fixed in the adversarial
+  review.
+- Created `REVIEW_PROMPT.md` (handover to a fresh opencode session
+  for the adversarial review). 187 lines. Tells the new session to
+  start with an adversarial review focused on modularity, consistency,
+  and lack of bugs across the Kilo+OpenCode addition; fix what it
+  finds; do not commit unless asked; ≥85% coverage gate.
+- Configured `~/.config/opencode/opencode.jsonc` to default
+  `model = minimax-coding-plan/MiniMax-M3` (provider id matches the
+  existing `auth.json` entry `minimax-coding-plan`). Smoke test:
+  `opencode run --model minimax-coding-plan/MiniMax-M3 "Reply with
+  exactly one word: ok"` returned `ok`.
+- Tests so far: 160 pass; the 26 new opencode tests have 2 failures
+  (PATH=/var/empty + gateway+balance). Coverage: TBD; gate is
+  `--fail-under=85`.
