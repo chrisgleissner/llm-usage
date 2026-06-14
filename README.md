@@ -9,11 +9,11 @@
 
 `llm-tools` is a small set of command-line tools for staying on top of local LLM provider capacity: session windows, weekly limits, quotas, credit balances, cost budgets, and provider availability.
 
-The goal is to make LLM CLI work more observable and less wasteful. You can see which providers still have capacity, avoid burning weekly limits blindly, and dispatch tasks as soon as a provider becomes usable again instead of leaving open session windows idle.
+The goal is to make LLM CLI work **more observable and less wasteful**. You can see which providers still have capacity, avoid burning weekly limits blindly, and dispatch tasks as soon as a provider becomes usable again instead of leaving open session windows idle.
 
-The tools are intentionally local-first and CLI-first. Instead of introducing another authentication layer, they use the provider CLIs you already have installed and authenticated. Credentials stay with those tools, and normal use remains zero-config.
+The tools are intentionally **local- and CLI-first**. Instead of introducing another authentication layer, they use the provider CLIs you already have installed and authenticated. Credentials stay with those tools, and normal use remains zero-config.
 
-Supported providers include Codex, Claude Code, GitHub Copilot, Kilo Code, MiniMax, and OpenCode.
+Supported providers include: **Codex, Claude Code, GitHub Copilot, Kilo Code, MiniMax, and OpenCode**.
 
 ## Tools at a Glance
 
