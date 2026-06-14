@@ -26,7 +26,8 @@ FAST_SUCCESS_ABORT_STREAK = 5
 HARD_FAIL_ABORT_STREAK = 6
 
 
-USAGE = """Usage: ralph-robin (--prompt TEXT | --prompt-file FILE) [options]
+USAGE = """Usage: ralph-robin
+  ralph-robin (-p TEXT | -f FILE) [options]
 
 Round-robin prompt submission across local LLM CLIs. By default it prefers the
 provider with the highest remaining daily capacity (reset-window or budget
@@ -59,63 +60,41 @@ Examples:
   ralph-robin --prompt-file task.md --dry-run
 
 Options:
-  --tools LIST                Comma-separated tools in rotation (default: claude,codex).
-                              Values: codex, claude, copilot, kilo, opencode, minimax.
-  --prompt TEXT               Prompt text.
-  --prompt-file FILE          Read prompt from FILE, preserving content.
-  --scope auto|5h|weekly|monthly|balance|budget|byok|ungated
-                              Capacity scope to gate on (default: auto).
-  --min-remaining PERCENT     Minimum required remaining percentage (default: 1).
-  --poll-interval SECONDS     Poll interval passed to llm-scheduler (default: 60).
-  --max-unavailable-wait SECONDS  Bound inconclusive usage waits before optimistic
-                              launch (default: 900; 0 waits forever).
-  --retry-delays LIST         Comma-separated retry delays (default: 60,180,600).
-  --no-retry                  Disable retries after failed submission.
-  --even-burn                 Prefer the tool with the highest remaining daily
-                              capacity, i.e. budget/weekly remaining divided by the
-                              days until reset (default).
-  --no-even-burn              Keep using the current provider until exhausted.
-  --max-iterations N          Stop after N successful increments (default: 0,
-                              meaning no iteration limit).
-  --max-duration DURATION     Stop once this much wall-clock time has elapsed,
-                              e.g. 24h, 90m, 30s, or bare seconds (default: 24h;
-                              0 means no time limit). The loop stops when either
-                              --max-iterations or --max-duration is reached.
-  --min-iteration-seconds N   Floor on how fast successive increments may run
-                              (default: 5; 0 disables). Paces the loop so a
-                              provider that exits instantly cannot spin, and
-                              aborts if it keeps returning instant successes
-                              without doing real work.
-  --prefix LIST               Comma-separated fields to stamp on each relayed
-                              provider line, rendered inside [ ] in the given
-                              order (default: time,tool -> "[19:13:39 codex] ").
-                              Fields: time (HH:MM:SS), tool (provider name),
-                              usage (remaining per scope). Use "none" (or an empty value)
-                              to turn the prefix off entirely, brackets included.
-  --prefix-usage-interval SECONDS
-                              Refresh interval for the cached "usage" prefix
-                              field (default: 15; 0 refreshes every line). Only
-                              relevant when "usage" is in --prefix.
-  --cwd DIR                   Working directory for the target CLI (default: current directory).
-  --fresh                     Launch a fresh CLI process through llm-scheduler (default).
-  --headless                  Always use the non-interactive provider command
-                              and captured PTY, even on a terminal.
-  --tmux SESSION[:WINDOW]     Execute through tmux via llm-scheduler.
-  --command-template TEMPLATE Override provider command; placeholders: {tool}, {prompt}, {prompt_file}, {cwd}.
-  --auto-confirm              Acknowledge only known safe prompts (default).
-  --no-auto-confirm           Disable automatic prompt acknowledgement.
-  --headless-idle-timeout SECONDS
-                              Abort headless runs with no output progress
-                              (default: LLM_SCHEDULER_IDLE_TIMEOUT or 600; 0 disables).
-  --headless-question-timeout SECONDS
-                              Abort headless runs that ask a question then stop
-                              making progress (default: LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT or 30; 0 disables).
-  --log-dir DIR               Log directory (default: ~/.cache/llm-tools/ralph-robin/logs).
-  --state-file FILE           Rotation state file (default: ~/.cache/llm-tools/ralph-robin/state.json).
-  --wake                      Pass best-effort wake scheduling to llm-scheduler.
-  --suspend-until-ready       Suspend even for the selected tool's own wait gates.
-  --dry-run                   Resolve rotation and usage state without submitting.
-  -h, --help                  Show this help.
+  -t, --tools LIST                         Tools in rotation (default: claude,codex).
+  -p, --prompt TEXT                        Prompt text.
+  -f, --prompt-file FILE                   Read prompt from FILE, preserving content.
+  -s, --scope SCOPE                        Capacity scope to gate on (default: auto).
+  -W, --window SCOPE                       Deprecated alias for --scope.
+  -m, --min-remaining PERCENT              Minimum required remaining percentage (default: 1).
+  -i, --poll-interval SECONDS              Poll interval passed to llm-scheduler (default: 60).
+  -u, --max-unavailable-wait SECONDS       Bound inconclusive usage waits before optimistic launch.
+  -r, --retry-delays LIST                  Comma-separated retry delays (default: 60,180,600).
+  -R, --no-retry                           Disable retries after failed submission.
+  -e, --even-burn                          Prefer highest remaining daily capacity (default).
+  -E, --no-even-burn                       Keep using current provider until exhausted.
+  -n, --max-iterations N                   Stop after N successful increments (0 means no limit).
+  -D, --max-duration DURATION              Stop after duration like 24h, 90m, 30s (default: 24h).
+  -I, --min-iteration-seconds N            Floor on successive increment runtime (default: 5).
+  -P, --prefix LIST                        Prefix relayed lines with fields: time, tool, usage.
+  -X, --prefix-usage-interval SECONDS      Refresh interval for cached prefix usage field.
+  -C, --cwd DIR                            Working directory for target CLI.
+  -F, --fresh                              Launch a fresh CLI process through llm-scheduler.
+  -H, --headless                           Use non-interactive provider command on captured PTY.
+  -T, --tmux SESSION[:WINDOW]              Execute through tmux via llm-scheduler.
+  -g, --command-template TEMPLATE          Override provider command; placeholders: {tool}, {prompt}, {prompt_file}, {cwd}.
+  -y, --auto-confirm                       Acknowledge only known safe prompts (default).
+  -Y, --no-auto-confirm                    Disable automatic prompt acknowledgement.
+  -q, --headless-idle-timeout SECONDS      Abort headless runs with no output progress (0 disables).
+  -Q, --headless-question-timeout SECONDS  Abort headless runs that ask a question then stall.
+  -L, --log-dir DIR                        Log directory.
+  -S, --state-file FILE                    Rotation state file.
+  -k, --wake                               Pass best-effort wake scheduling to llm-scheduler.
+  -U, --suspend-until-ready                Suspend even for selected tool wait gates.
+  -d, --dry-run                            Resolve rotation and usage state without submitting.
+  -h, --help                               Show this help.
+
+Tools: codex, claude, copilot, kilo, opencode, minimax.
+Scopes: auto, 5h, weekly, monthly, balance, budget, byok, ungated.
 """
 
 
@@ -346,79 +325,79 @@ def parse_args(argv: list[str]) -> RalphConfig:
             i += 2
             return value
 
-        if arg == "--tools":
+        if arg in ("-t", "--tools"):
             cfg.tools_spec = need_value("--tools requires a value")
-        elif arg == "--prompt":
+        elif arg in ("-p", "--prompt"):
             cfg.prompt_text = need_value("--prompt requires text")
             cfg.prompt_source = "inline"
-        elif arg == "--prompt-file":
+        elif arg in ("-f", "--prompt-file"):
             cfg.prompt_file = need_value("--prompt-file requires a file")
             cfg.prompt_source = f"file:{cfg.prompt_file}"
-        elif arg in ("--scope", "--window"):  # --window is a deprecated alias for --scope
+        elif arg in ("-s", "--scope", "-W", "--window"):  # --window is a deprecated alias for --scope
             cfg.scope = need_value("--scope requires a value")
-        elif arg == "--min-remaining":
+        elif arg in ("-m", "--min-remaining"):
             cfg.min_remaining = need_value("--min-remaining requires a value")
-        elif arg == "--poll-interval":
+        elif arg in ("-i", "--poll-interval"):
             cfg.poll_interval = need_value("--poll-interval requires seconds")
-        elif arg == "--max-unavailable-wait":
+        elif arg in ("-u", "--max-unavailable-wait"):
             cfg.max_unavailable_wait = need_value("--max-unavailable-wait requires seconds")
-        elif arg == "--retry-delays":
+        elif arg in ("-r", "--retry-delays"):
             cfg.retry_delays = need_value("--retry-delays requires a list")
-        elif arg == "--no-retry":
+        elif arg in ("-R", "--no-retry"):
             cfg.retry_delays = ""
             i += 1
-        elif arg == "--even-burn":
+        elif arg in ("-e", "--even-burn"):
             cfg.even_burn = True
             i += 1
-        elif arg == "--no-even-burn":
+        elif arg in ("-E", "--no-even-burn"):
             cfg.even_burn = False
             i += 1
-        elif arg == "--max-iterations":
+        elif arg in ("-n", "--max-iterations"):
             cfg.max_iterations = need_value("--max-iterations requires a count")
-        elif arg == "--max-duration":
+        elif arg in ("-D", "--max-duration"):
             cfg.max_duration = need_value("--max-duration requires a duration")
-        elif arg == "--min-iteration-seconds":
+        elif arg in ("-I", "--min-iteration-seconds"):
             cfg.min_iteration_seconds = need_value("--min-iteration-seconds requires seconds")
-        elif arg == "--prefix":
+        elif arg in ("-P", "--prefix"):
             cfg.prefix_spec = need_value("--prefix requires a value")
-        elif arg == "--prefix-usage-interval":
+        elif arg in ("-X", "--prefix-usage-interval"):
             cfg.prefix_usage_interval = need_value("--prefix-usage-interval requires seconds")
-        elif arg == "--cwd":
+        elif arg in ("-C", "--cwd"):
             cfg.cwd = need_value("--cwd requires a directory")
-        elif arg == "--fresh":
+        elif arg in ("-F", "--fresh"):
             cfg.exec_mode = "fresh"
             cfg.tmux_target = ""
             i += 1
-        elif arg == "--headless":
+        elif arg in ("-H", "--headless"):
             cfg.headless = True
             i += 1
-        elif arg == "--tmux":
+        elif arg in ("-T", "--tmux"):
             cfg.exec_mode = "tmux"
             cfg.tmux_target = need_value("--tmux requires SESSION[:WINDOW]")
-        elif arg == "--command-template":
+        elif arg in ("-g", "--command-template"):
             cfg.command_template = need_value("--command-template requires a template")
-        elif arg == "--auto-confirm":
+        elif arg in ("-y", "--auto-confirm"):
             cfg.auto_confirm = True
             i += 1
-        elif arg == "--no-auto-confirm":
+        elif arg in ("-Y", "--no-auto-confirm"):
             cfg.auto_confirm = False
             i += 1
-        elif arg == "--headless-idle-timeout":
+        elif arg in ("-q", "--headless-idle-timeout"):
             os.environ["LLM_SCHEDULER_IDLE_TIMEOUT"] = need_value("--headless-idle-timeout requires seconds")
-        elif arg == "--headless-question-timeout":
+        elif arg in ("-Q", "--headless-question-timeout"):
             os.environ["LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT"] = need_value("--headless-question-timeout requires seconds")
-        elif arg == "--log-dir":
+        elif arg in ("-L", "--log-dir"):
             cfg.log_dir = Path(need_value("--log-dir requires a directory"))
-        elif arg == "--state-file":
+        elif arg in ("-S", "--state-file"):
             cfg.state_file = Path(need_value("--state-file requires a file"))
-        elif arg == "--wake":
+        elif arg in ("-k", "--wake"):
             cfg.wake = True
             i += 1
-        elif arg == "--suspend-until-ready":
+        elif arg in ("-U", "--suspend-until-ready"):
             cfg.suspend_until_ready = True
             cfg.wake = True
             i += 1
-        elif arg == "--dry-run":
+        elif arg in ("-d", "--dry-run"):
             cfg.dry_run = True
             i += 1
         elif arg in ("-h", "--help"):

@@ -27,7 +27,8 @@ RESET_COL_WIDTH = 10
 GUIDANCE_TOLERANCE_PP = 5.0
 
 
-USAGE = """Usage: llm-usage [--json] [--watch SECONDS] [--show-copilot-credits] [--statusline] [--no-header] [--log-only]
+USAGE = """Usage: llm-usage
+  llm-usage [options]
 
 Shows remaining capacity per scope for:
   - Codex 5-hour window
@@ -40,24 +41,24 @@ Shows remaining capacity per scope for:
   - MiniMax 5-hour and weekly windows (when the mmx CLI is on PATH)
 
 Options:
-  --json              Emit JSON instead of a table.
-  -w, --watch SECONDS  Refresh repeatedly.
-  --show-copilot-credits  Show Copilot AI credits row.
-  --show-source         Show Source column. By default, Source is hidden.
-  --hide-source         Hide Source column (default).
-  --show-remaining-time  Show Remaining Time column.
-  --hide-remaining-time Hide Remaining Time column (default).
-  --show-daily-budget   Show Guidance column (default).
-  --hide-daily-budget   Hide Guidance column.
-  --show-codex-spark    Show Codex Spark rows (default).
-  --hide-codex-spark    Hide Codex Spark rows.
-  --copilot-monthly-reset-offset-days DAYS  Day offset from month start for Copilot monthly reset (default: 0).
-  --statusline        Read Claude Code statusline JSON from stdin, cache it, print compact line.
-  --log-only          Sample providers and append to the usage log without printing a table.
-  --no-header         Omit table header.
-  --provider-parallelism N
-                      Number of provider readers to run concurrently (default: CPU cores).
-  -h, --help          Show this help.
+  -j, --json                               Emit JSON instead of a table.
+  -w, --watch SECONDS                      Refresh repeatedly.
+  -C, --show-copilot-credits               Show Copilot AI credits row.
+  -S, --show-source                        Show Source column.
+  -s, --hide-source                        Hide Source column (default).
+  -R, --show-remaining-time                Show Remaining Time column.
+  -r, --hide-remaining-time                Hide Remaining Time column (default).
+  -D, --show-daily-budget                  Show Guidance column (default).
+  -d, --hide-daily-budget                  Hide Guidance column.
+  -K, --show-codex-spark                   Show Codex Spark rows (default).
+  -k, --hide-codex-spark                   Hide Codex Spark rows.
+  -M, --copilot-monthly-reset-offset-days DAYS
+                                           Day offset from month start for Copilot monthly reset.
+  -t, --statusline                         Read Claude statusline JSON from stdin and cache it.
+  -l, --log-only                           Sample providers and append to the usage log only.
+  -n, --no-header                          Omit table header.
+  -p, --provider-parallelism N             Provider readers to run concurrently (default: CPU cores).
+  -h, --help                               Show this help.
 """
 
 
@@ -107,7 +108,7 @@ def parse_args(argv: list[str]) -> Config:
     i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg == "--json":
+        if arg in ("-j", "--json"):
             cfg.json_output = True
             i += 1
         elif arg in ("-w", "--watch"):
@@ -116,54 +117,54 @@ def parse_args(argv: list[str]) -> Config:
                 raise SystemExit(2)
             cfg.watch_interval = argv[i + 1]
             i += 2
-        elif arg == "--show-copilot-credits":
+        elif arg in ("-C", "--show-copilot-credits"):
             cfg.show_copilot_credits = True
             i += 1
-        elif arg == "--show-source":
+        elif arg in ("-S", "--show-source"):
             cfg.show_source = True
             i += 1
-        elif arg == "--hide-source":
+        elif arg in ("-s", "--hide-source"):
             cfg.show_source = False
             i += 1
-        elif arg == "--show-remaining-time":
+        elif arg in ("-R", "--show-remaining-time"):
             cfg.show_remaining_time = True
             i += 1
-        elif arg == "--hide-remaining-time":
+        elif arg in ("-r", "--hide-remaining-time"):
             cfg.show_remaining_time = False
             i += 1
-        elif arg == "--show-daily-budget":
+        elif arg in ("-D", "--show-daily-budget"):
             cfg.show_daily_budget = True
             i += 1
-        elif arg == "--hide-daily-budget":
+        elif arg in ("-d", "--hide-daily-budget"):
             cfg.show_daily_budget = False
             i += 1
-        elif arg == "--show-codex-spark":
+        elif arg in ("-K", "--show-codex-spark"):
             cfg.show_codex_spark = True
             i += 1
-        elif arg == "--hide-codex-spark":
+        elif arg in ("-k", "--hide-codex-spark"):
             cfg.show_codex_spark = False
             i += 1
-        elif arg == "--copilot-monthly-reset-offset-days":
+        elif arg in ("-M", "--copilot-monthly-reset-offset-days"):
             if i + 1 >= len(argv):
-                common.err("--copilot-monthly-reset-offset-days requires DAYS")
+                common.err(f"{arg} requires DAYS")
                 raise SystemExit(2)
             os.environ["LLM_USAGE_COPILOT_MONTHLY_RESET_OFFSET_DAYS"] = argv[i + 1]
             i += 2
-        elif arg == "--statusline":
+        elif arg in ("-t", "--statusline"):
             cfg.statusline_mode = True
             i += 1
-        elif arg == "--log-only":
+        elif arg in ("-l", "--log-only"):
             cfg.log_only = True
             i += 1
-        elif arg == "--no-header":
+        elif arg in ("-n", "--no-header"):
             cfg.no_header = True
             i += 1
-        elif arg == "--provider-parallelism":
+        elif arg in ("-p", "--provider-parallelism"):
             if i + 1 >= len(argv):
-                common.err("--provider-parallelism requires N")
+                common.err(f"{arg} requires N")
                 raise SystemExit(2)
             if not common.is_integer(argv[i + 1]) or int(argv[i + 1]) < 1:
-                common.err("--provider-parallelism must be a positive integer")
+                common.err(f"{arg} must be a positive integer")
                 raise SystemExit(2)
             cfg.provider_parallelism = int(argv[i + 1])
             i += 2

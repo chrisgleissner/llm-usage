@@ -18,7 +18,8 @@ from . import common
 APP_NAME = "llm-scheduler"
 
 
-USAGE = """Usage: llm-scheduler --tool codex|claude|copilot|kilo|opencode|minimax (--prompt TEXT | --prompt-file FILE) [options]
+USAGE = """Usage: llm-scheduler
+  llm-scheduler -t TOOL (-p TEXT | -f FILE) [options]
 
 Submit a prompt to a local LLM CLI as soon as shared llm-usage data says it is usable.
 
@@ -44,46 +45,39 @@ Examples:
   llm-scheduler --tool codex --prompt-file task.md --dry-run
 
 Options:
-  --tool TOOL                 codex, claude, copilot, kilo, opencode, or minimax.
-  --prompt TEXT               Prompt text.
-  --prompt-file FILE          Read prompt from FILE, preserving content.
-  --at TIME, --not-before TIME  Do not submit before date -d compatible local time.
-  --scope auto|5h|weekly|monthly|balance|budget|byok|ungated
-                               Capacity scope to gate on (default: auto).
-                               codex/claude/minimax: auto|5h|weekly; copilot: auto|monthly;
-                               kilo/opencode: auto|balance|budget|byok|ungated.
-  --min-remaining PERCENT     Minimum required remaining percentage (default: 1).
-  --poll-interval SECONDS     Poll interval when reset data is unavailable (default: 60).
-  --max-unavailable-wait SECONDS  Max time to keep polling while usage data cannot be
-                              measured (no network, transient API failure, inconclusive
-                              data) before launching optimistically and letting the tool's
-                              own rate-limit handling and --retry-delays take over.
-                              0 waits forever (default: 900). Does not apply to a known
-                              rate-limit reset, which always waits for the real reset time.
-  --retry-delays LIST         Comma-separated retry delays (default: 60,180,600).
-  --no-retry                  Disable retries after failed submission.
-  --cwd DIR                   Working directory for the target CLI (default: current directory).
-  --fresh                     Launch a fresh CLI process (default).
-  --headless                  Always use the non-interactive provider command
-                              and captured PTY, even on a terminal.
-  --tmux SESSION[:WINDOW]     Execute via tmux instead of foreground process.
-  --command-template TEMPLATE Override provider command; placeholders: {tool}, {prompt}, {prompt_file}, {cwd}.
-  --auto-confirm              Acknowledge only known safe prompts (default).
-  --no-auto-confirm           Disable automatic prompt acknowledgement.
-  --headless-idle-timeout SECONDS
-                              Abort headless runs with no output progress
-                              (default: LLM_SCHEDULER_IDLE_TIMEOUT or 600; 0 disables).
-  --headless-question-timeout SECONDS
-                              Abort headless runs that ask a question then stop
-                              making progress (default: LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT or 30; 0 disables).
-  --log-dir DIR               Log directory (default: ~/.cache/llm-tools/llm-scheduler/logs).
-  --run-dir DIR               Reuse/write one specific run directory.
-  --dry-run                   Resolve state and command plan without submitting.
-  --wake                      Best-effort wake scheduling diagnostics/logging.
-  --suspend-until-ready       Arm a wake timer for the next reset/not-before time,
-                              suspend now, and run this scheduler after wake.
-  --wake-test                 Print wake capability diagnostics and exit.
-  -h, --help                  Show this help.
+  -t, --tool TOOL                         Provider: codex, claude, copilot, kilo, opencode, minimax.
+  -p, --prompt TEXT                       Prompt text.
+  -f, --prompt-file FILE                  Read prompt from FILE, preserving content.
+  -a, --at TIME                           Do not submit before date-compatible local time.
+  -a, --not-before TIME                   Alias for --at.
+  -s, --scope SCOPE                       Capacity scope to gate on (default: auto).
+  -W, --window SCOPE                      Deprecated alias for --scope.
+  -m, --min-remaining PERCENT             Minimum required remaining percentage (default: 1).
+  -i, --poll-interval SECONDS             Poll interval when reset data is unavailable (default: 60).
+  -u, --max-unavailable-wait SECONDS      Max inconclusive-data wait before optimistic launch (default: 900; 0 forever).
+  -r, --retry-delays LIST                 Comma-separated retry delays (default: 60,180,600).
+  -R, --no-retry                          Disable retries after failed submission.
+  -C, --cwd DIR                           Working directory for the target CLI (default: current directory).
+  -F, --fresh                             Launch a fresh CLI process (default).
+  -H, --headless                          Always use non-interactive provider command on a captured PTY.
+  -T, --tmux SESSION[:WINDOW]             Execute via tmux instead of foreground process.
+  -e, --command-template TEMPLATE         Override provider command; placeholders: {tool}, {prompt}, {prompt_file}, {cwd}.
+  -y, --auto-confirm                      Acknowledge only known safe prompts (default).
+  -Y, --no-auto-confirm                   Disable automatic prompt acknowledgement.
+  -I, --headless-idle-timeout SECONDS     Abort headless runs with no output progress (0 disables).
+  -Q, --headless-question-timeout SECONDS Abort headless runs that ask a question then stall (0 disables).
+  -L, --log-dir DIR                       Log directory.
+  -O, --run-dir DIR                       Reuse/write one specific run directory.
+  -d, --dry-run                           Resolve state and command plan without submitting.
+  -k, --wake                              Best-effort wake scheduling diagnostics/logging.
+  -U, --suspend-until-ready               Suspend until the next reset/not-before time.
+  -x, --wake-test                         Print wake capability diagnostics and exit.
+  -h, --help                              Show this help.
+
+Scopes:
+  codex/claude/minimax: auto, 5h, weekly
+  copilot:              auto, monthly
+  kilo/opencode:        auto, balance, budget, byok, ungated
 """
 
 
@@ -140,68 +134,68 @@ def parse_args(argv: list[str]) -> SchedulerConfig:
             i += 2
             return value
 
-        if arg == "--tool":
+        if arg in ("-t", "--tool"):
             cfg.tool = need_value("--tool requires a value")
-        elif arg == "--prompt":
+        elif arg in ("-p", "--prompt"):
             cfg.prompt_text = need_value("--prompt requires text")
             cfg.prompt_source = "inline"
-        elif arg == "--prompt-file":
+        elif arg in ("-f", "--prompt-file"):
             cfg.prompt_file = need_value("--prompt-file requires a file")
             cfg.prompt_source = f"file:{cfg.prompt_file}"
-        elif arg in ("--at", "--not-before"):
+        elif arg in ("-a", "--at", "--not-before"):
             cfg.at_time = need_value(f"{arg} requires a time")
-        elif arg in ("--scope", "--window"):  # --window is a deprecated alias for --scope
+        elif arg in ("-s", "--scope", "-W", "--window"):  # --window is a deprecated alias for --scope
             cfg.scope = need_value("--scope requires a value")
-        elif arg == "--min-remaining":
+        elif arg in ("-m", "--min-remaining"):
             cfg.min_remaining = need_value("--min-remaining requires a value")
-        elif arg == "--poll-interval":
+        elif arg in ("-i", "--poll-interval"):
             cfg.poll_interval = need_value("--poll-interval requires seconds")
-        elif arg == "--max-unavailable-wait":
+        elif arg in ("-u", "--max-unavailable-wait"):
             cfg.max_unavailable_wait = need_value("--max-unavailable-wait requires seconds")
-        elif arg == "--retry-delays":
+        elif arg in ("-r", "--retry-delays"):
             cfg.retry_delays = need_value("--retry-delays requires a list")
-        elif arg == "--no-retry":
+        elif arg in ("-R", "--no-retry"):
             cfg.retry_delays = ""
             i += 1
-        elif arg == "--cwd":
+        elif arg in ("-C", "--cwd"):
             cfg.cwd = need_value("--cwd requires a directory")
-        elif arg == "--fresh":
+        elif arg in ("-F", "--fresh"):
             cfg.exec_mode = "fresh"
             cfg.tmux_target = ""
             i += 1
-        elif arg == "--headless":
+        elif arg in ("-H", "--headless"):
             cfg.headless = True
             i += 1
-        elif arg == "--tmux":
+        elif arg in ("-T", "--tmux"):
             cfg.exec_mode = "tmux"
             cfg.tmux_target = need_value("--tmux requires SESSION[:WINDOW]")
-        elif arg == "--command-template":
+        elif arg in ("-e", "--command-template"):
             cfg.command_template = need_value("--command-template requires a template")
-        elif arg == "--auto-confirm":
+        elif arg in ("-y", "--auto-confirm"):
             cfg.auto_confirm = True
             i += 1
-        elif arg == "--no-auto-confirm":
+        elif arg in ("-Y", "--no-auto-confirm"):
             cfg.auto_confirm = False
             i += 1
-        elif arg == "--headless-idle-timeout":
+        elif arg in ("-I", "--headless-idle-timeout"):
             os.environ["LLM_SCHEDULER_IDLE_TIMEOUT"] = need_value("--headless-idle-timeout requires seconds")
-        elif arg == "--headless-question-timeout":
+        elif arg in ("-Q", "--headless-question-timeout"):
             os.environ["LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT"] = need_value("--headless-question-timeout requires seconds")
-        elif arg == "--log-dir":
+        elif arg in ("-L", "--log-dir"):
             cfg.log_dir = Path(need_value("--log-dir requires a directory"))
-        elif arg == "--run-dir":
+        elif arg in ("-O", "--run-dir"):
             cfg.run_dir = Path(need_value("--run-dir requires a directory"))
-        elif arg == "--dry-run":
+        elif arg in ("-d", "--dry-run"):
             cfg.dry_run = True
             i += 1
-        elif arg == "--wake":
+        elif arg in ("-k", "--wake"):
             cfg.wake = True
             i += 1
-        elif arg == "--suspend-until-ready":
+        elif arg in ("-U", "--suspend-until-ready"):
             cfg.suspend_until_ready = True
             cfg.wake = True
             i += 1
-        elif arg == "--wake-test":
+        elif arg in ("-x", "--wake-test"):
             cfg.wake_test = True
             i += 1
         elif arg in ("-h", "--help"):

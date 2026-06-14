@@ -33,10 +33,61 @@ def seed_provider_data(env: dict[str, str]) -> None:
 def test_usage_help_and_validation(env: dict[str, str]) -> None:
     help_result = run_cmd(["./llm-usage", "--help"], env)
     assert help_result.returncode == 0
-    assert "Usage: llm-usage" in help_result.stdout
+    assert "Usage:" in help_result.stdout
+    assert "llm-usage [options]" in help_result.stdout
+    assert "-j, --json" in help_result.stdout
+    assert "-p, --provider-parallelism" in help_result.stdout
     bad = run_cmd(["./llm-usage", "--watch", "abc"], env)
     assert bad.returncode == 2
     assert "watch requires numeric seconds" in bad.stderr
+
+
+def test_short_cli_aliases(env: dict[str, str]) -> None:
+    seed_provider_data(env)
+    env["LLM_USAGE_DISABLE_COPILOT"] = "1"
+    usage_short = run_cmd(["./llm-usage", "-j", "-p", "1", "-S", "-R"], env)
+    assert usage_short.returncode == 0, usage_short.stderr
+    assert json.loads(usage_short.stdout)["codex"]["available"] is True
+
+    sched_short = run_cmd(
+        [
+            "./llm-scheduler",
+            "-t",
+            "codex",
+            "-p",
+            "x",
+            "-s",
+            "5h",
+            "-e",
+            "true",
+            "-d",
+            "-L",
+            str(Path(env["HOME"]) / "sched-logs"),
+        ],
+        env,
+    )
+    assert sched_short.returncode == 0, sched_short.stderr
+
+    ralph_short = run_cmd(
+        [
+            "./ralph-robin",
+            "-t",
+            "codex",
+            "-p",
+            "x",
+            "-g",
+            "true",
+            "-d",
+            "-n",
+            "1",
+            "-S",
+            str(Path(env["HOME"]) / "ralph-state.json"),
+            "-L",
+            str(Path(env["HOME"]) / "ralph-logs"),
+        ],
+        env,
+    )
+    assert ralph_short.returncode == 0, ralph_short.stderr
 
 
 def test_usage_json_table_statusline_and_cache(env: dict[str, str]) -> None:

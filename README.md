@@ -213,18 +213,23 @@ How to read the table:
 
 | Option                   | Purpose                                                                                                 |
 | ------------------------ | ------------------------------------------------------------------------------------------------------- |
-| `--json`                 | Print stable JSON with `generated_at`, `codex`, `claude`, `copilot`, `kilo`, `opencode`, and `minimax`. |
-| `--watch/-w SECONDS`     | Refresh continuously.                                                                                   |
-| `--show-source`          | Show where each usage row came from.                                                                    |
-| `--show-copilot-credits` | Include Copilot AI credits when parseable.                                                              |
-| `--show-remaining-time`  | Show burn-time estimates.                                                                               |
-| `--hide-remaining-time`  | Hide burn-time estimates. This is the default.                                                          |
-| `--show-daily-budget`    | Show the `Guidance` column. This is the default.                                                        |
-| `--hide-daily-budget`    | Hide the `Guidance` column.                                                                             |
-| `--show-codex-spark`     | Show Codex Spark rows.                                                                                  |
-| `--hide-codex-spark`     | Hide Codex Spark rows.                                                                                  |
-| `--provider-parallelism N` | Number of provider readers to run concurrently. Default: CPU cores; env: `LLM_USAGE_PROVIDER_PARALLELISM`. |
-| `--statusline`           | Read Claude Code statusline JSON from stdin and cache it.                                               |
+| `-j`, `--json`           | Print stable JSON with `generated_at`, `codex`, `claude`, `copilot`, `kilo`, `opencode`, and `minimax`. |
+| `-w`, `--watch SECONDS`  | Refresh continuously.                                                                                   |
+| `-C`, `--show-copilot-credits` | Include Copilot AI credits when parseable.                                                        |
+| `-S`, `--show-source`    | Show where each usage row came from.                                                                    |
+| `-s`, `--hide-source`    | Hide the source column. This is the default.                                                            |
+| `-R`, `--show-remaining-time` | Show burn-time estimates.                                                                          |
+| `-r`, `--hide-remaining-time` | Hide burn-time estimates. This is the default.                                                    |
+| `-D`, `--show-daily-budget` | Show the `Guidance` column. This is the default.                                                     |
+| `-d`, `--hide-daily-budget` | Hide the `Guidance` column.                                                                          |
+| `-K`, `--show-codex-spark` | Show Codex Spark rows.                                                                                |
+| `-k`, `--hide-codex-spark` | Hide Codex Spark rows.                                                                                |
+| `-M`, `--copilot-monthly-reset-offset-days DAYS` | Day offset from month start for Copilot monthly reset.                         |
+| `-p`, `--provider-parallelism N` | Number of provider readers to run concurrently. Default: CPU cores; env: `LLM_USAGE_PROVIDER_PARALLELISM`. |
+| `-t`, `--statusline`     | Read Claude Code statusline JSON from stdin and cache it.                                               |
+| `-l`, `--log-only`       | Sample providers and append to the usage log without printing a table.                                  |
+| `-n`, `--no-header`      | Omit the table header.                                                                                  |
+| `-h`, `--help`           | Show help.                                                                                              |
 
 ## `llm-scheduler`
 
@@ -297,29 +302,34 @@ llm-scheduler --tool codex --prompt-file task.md --dry-run
 
 | Option                                                              | Purpose                                                                                                                                            |
 | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--at TIME`                                                         | Delay launch until a `date -d` compatible local time.                                                                                              |
-| `--not-before TIME`                                                 | Do not launch before a `date -d` compatible local time.                                                                                            |
-| `--scope auto\|5h\|weekly\|monthly\|balance\|budget\|byok\|ungated` | Capacity scope to gate on. Default: `auto`.                                                                                                        |
-| `--min-remaining PERCENT`                                           | Minimum remaining capacity required to launch. Default: `1`. For Kilo `balance`, this is compared against `LLM_USAGE_KILO_BALANCE`.                |
-| `--poll-interval SECONDS`                                           | Usage polling interval. Default: `60`.                                                                                                             |
-| `--max-unavailable-wait SECONDS`                                    | Maximum wait when usage cannot be measured. Default: `900`. Use `0` to wait forever. Known rate limits with real reset times still wait for reset. |
-| `--retry-delays LIST`                                               | Retry delays. Default: `60,180,600`.                                                                                                               |
-| `--no-retry`                                                        | Disable retries.                                                                                                                                   |
-| `--cwd DIR`                                                         | Set provider working directory.                                                                                                                    |
-| `--fresh`                                                           | Launch a fresh foreground provider process. This is the default.                                                                                   |
-| `--headless`                                                        | Force non-interactive provider command and captured PTY.                                                                                           |
-| `--tmux SESSION[:WINDOW]`                                           | Run through tmux.                                                                                                                                  |
-| `--command-template TEMPLATE`                                       | Override provider syntax. Supports `{tool}`, `{prompt}`, `{prompt_file}`, and `{cwd}`. Parsed with Python `shlex`, not a shell.                    |
-| `--auto-confirm`                                                    | Auto-confirm recognised safe trust prompts. This is the default.                                                                                   |
-| `--no-auto-confirm`                                                 | Disable safe auto-confirmation.                                                                                                                    |
-| `--headless-idle-timeout SECONDS`                                   | Abort headless fresh mode after no output progress. Default: `600`. Use `0` to disable.                                                            |
-| `--headless-question-timeout SECONDS`                               | Abort headless fresh mode after question-like output stalls. Default: `30`. Use `0` to disable.                                                    |
-| `--log-dir DIR`                                                     | Set scheduler log root.                                                                                                                            |
-| `--run-dir DIR`                                                     | Write or resume a specific run directory.                                                                                                          |
-| `--dry-run`                                                         | Resolve usage, timing, command plan, and logs without launching.                                                                                   |
-| `--wake`                                                            | Enable best-effort wake scheduling.                                                                                                                |
-| `--suspend-until-ready`                                             | Schedule a resumed run, enable wake, suspend the machine, and continue after wake.                                                                 |
-| `--wake-test`                                                       | Print wake diagnostics without scheduling work.                                                                                                    |
+| `-t`, `--tool TOOL`                                                 | Provider: `codex`, `claude`, `copilot`, `kilo`, `opencode`, or `minimax`.                                                                          |
+| `-p`, `--prompt TEXT`                                               | Prompt text.                                                                                                                                       |
+| `-f`, `--prompt-file FILE`                                          | Read prompt from `FILE`, preserving content.                                                                                                       |
+| `-a`, `--at TIME`                                                   | Delay launch until a `date -d` compatible local time.                                                                                              |
+| `-a`, `--not-before TIME`                                           | Do not launch before a `date -d` compatible local time.                                                                                            |
+| `-s`, `--scope auto\|5h\|weekly\|monthly\|balance\|budget\|byok\|ungated` | Capacity scope to gate on. Default: `auto`.                                                                                              |
+| `-W`, `--window SCOPE`                                              | Deprecated alias for `--scope`.                                                                                                                    |
+| `-m`, `--min-remaining PERCENT`                                     | Minimum remaining capacity required to launch. Default: `1`.                                                                                       |
+| `-i`, `--poll-interval SECONDS`                                     | Usage polling interval. Default: `60`.                                                                                                             |
+| `-u`, `--max-unavailable-wait SECONDS`                              | Maximum wait when usage cannot be measured. Default: `900`. Use `0` to wait forever. Known reset times still wait for reset.                       |
+| `-r`, `--retry-delays LIST`                                         | Retry delays. Default: `60,180,600`.                                                                                                               |
+| `-R`, `--no-retry`                                                  | Disable retries.                                                                                                                                   |
+| `-C`, `--cwd DIR`                                                   | Set provider working directory.                                                                                                                    |
+| `-F`, `--fresh`                                                     | Launch a fresh foreground provider process. This is the default.                                                                                   |
+| `-H`, `--headless`                                                  | Force non-interactive provider command and captured PTY.                                                                                           |
+| `-T`, `--tmux SESSION[:WINDOW]`                                     | Run through tmux.                                                                                                                                  |
+| `-e`, `--command-template TEMPLATE`                                 | Override provider syntax. Supports `{tool}`, `{prompt}`, `{prompt_file}`, and `{cwd}`. Parsed with Python `shlex`, not a shell.                    |
+| `-y`, `--auto-confirm`                                              | Auto-confirm recognised safe trust prompts. This is the default.                                                                                   |
+| `-Y`, `--no-auto-confirm`                                           | Disable safe auto-confirmation.                                                                                                                    |
+| `-I`, `--headless-idle-timeout SECONDS`                             | Abort headless fresh mode after no output progress. Default: `600`. Use `0` to disable.                                                            |
+| `-Q`, `--headless-question-timeout SECONDS`                         | Abort headless fresh mode after question-like output stalls. Default: `30`. Use `0` to disable.                                                    |
+| `-L`, `--log-dir DIR`                                               | Set scheduler log root.                                                                                                                            |
+| `-O`, `--run-dir DIR`                                               | Write or resume a specific run directory.                                                                                                          |
+| `-d`, `--dry-run`                                                   | Resolve usage, timing, command plan, and logs without launching.                                                                                   |
+| `-k`, `--wake`                                                      | Enable best-effort wake scheduling.                                                                                                                |
+| `-U`, `--suspend-until-ready`                                       | Schedule a resumed run, enable wake, suspend the machine, and continue after wake.                                                                 |
+| `-x`, `--wake-test`                                                 | Print wake diagnostics without scheduling work.                                                                                                    |
+| `-h`, `--help`                                                      | Show help.                                                                                                                                         |
 
 ### Default Provider Commands
 
@@ -389,36 +399,57 @@ ralph-robin --prompt-file task.md --prefix none
 
 | Option                                                              | Purpose                                                                                                                                                       |
 | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--tools LIST`                                                      | Set comma-separated provider rotation. Values include `claude`, `codex`, `copilot`, `kilo`, and `minimax`.                                                    |
-| `--prompt TEXT`                                                     | Prompt text passed to the selected provider.                                                                                                                  |
-| `--prompt-file FILE`                                                | Prompt file passed to the selected provider.                                                                                                                  |
-| `--scope auto\|5h\|weekly\|monthly\|balance\|budget\|byok\|ungated` | Capacity scope to gate on. Default: `auto`.                                                                                                                   |
-| `--even-burn`                                                       | Spread work to burn provider quota down evenly. Enabled by default.                                                                                           |
-| `--no-even-burn`                                                    | Keep using the current provider until it is exhausted.                                                                                                        |
-| `--max-iterations N`                                                | Stop after `N` successful increments. Default `0` means no iteration cap. Use `1` for single-shot.                                                            |
-| `--max-duration D`                                                  | Stop once `D` of wall-clock time elapses, such as `24h`, `90m`, `30s`, or seconds. Default: `24h`. Use `0` to disable. Whichever limit is reached first wins. |
-| `--prefix LIST`                                                     | Comma-separated fields stamped on each relayed provider line. Fields: `time`, `tool`, `usage`. Default: `time,tool`. Use `none` or an empty value to disable. |
-| `--prefix-usage-interval S`                                         | Refresh interval in seconds for the cached `usage` prefix field. Default: `15`. Use `0` to refresh every line.                                                |
-| `--state-file FILE`                                                 | Store current provider index. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json`.                                                    |
-| `--log-dir DIR`                                                     | Set Ralph log directory. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.                                                               |
+| `-t`, `--tools LIST`                                                | Set comma-separated provider rotation. Values include `claude`, `codex`, `copilot`, `kilo`, `opencode`, and `minimax`.                                       |
+| `-p`, `--prompt TEXT`                                               | Prompt text passed to the selected provider.                                                                                                                  |
+| `-f`, `--prompt-file FILE`                                          | Prompt file passed to the selected provider.                                                                                                                  |
+| `-s`, `--scope auto\|5h\|weekly\|monthly\|balance\|budget\|byok\|ungated` | Capacity scope to gate on. Default: `auto`.                                                                                                         |
+| `-W`, `--window SCOPE`                                              | Deprecated alias for `--scope`.                                                                                                                              |
+| `-m`, `--min-remaining PERCENT`                                     | Minimum remaining capacity required to launch. Default: `1`.                                                                                                  |
+| `-i`, `--poll-interval SECONDS`                                     | Poll interval passed to `llm-scheduler`. Default: `60`.                                                                                                      |
+| `-u`, `--max-unavailable-wait SECONDS`                              | Bound inconclusive usage waits before optimistic launch. Default: `900`; `0` waits forever.                                                                  |
+| `-r`, `--retry-delays LIST`                                         | Retry delays. Default: `60,180,600`.                                                                                                                          |
+| `-R`, `--no-retry`                                                  | Disable retries.                                                                                                                                              |
+| `-e`, `--even-burn`                                                 | Spread work to burn provider quota down evenly. Enabled by default.                                                                                           |
+| `-E`, `--no-even-burn`                                              | Keep using the current provider until it is exhausted.                                                                                                        |
+| `-n`, `--max-iterations N`                                          | Stop after `N` successful increments. Default `0` means no iteration cap. Use `1` for single-shot.                                                            |
+| `-D`, `--max-duration D`                                            | Stop once `D` of wall-clock time elapses, such as `24h`, `90m`, `30s`, or seconds. Default: `24h`. Use `0` to disable. Whichever limit is reached first wins. |
+| `-I`, `--min-iteration-seconds N`                                   | Minimum runtime floor for successive increments. Default: `5`; `0` disables.                                                                                  |
+| `-P`, `--prefix LIST`                                               | Comma-separated fields stamped on each relayed provider line. Fields: `time`, `tool`, `usage`. Default: `time,tool`. Use `none` or an empty value to disable. |
+| `-X`, `--prefix-usage-interval S`                                   | Refresh interval in seconds for the cached `usage` prefix field. Default: `15`. Use `0` to refresh every line.                                                |
+| `-C`, `--cwd DIR`                                                   | Set provider working directory.                                                                                                                               |
+| `-F`, `--fresh`                                                     | Launch a fresh provider process through `llm-scheduler`.                                                                                                      |
+| `-H`, `--headless`                                                  | Force non-interactive provider command and captured PTY.                                                                                                      |
+| `-T`, `--tmux SESSION[:WINDOW]`                                     | Execute through tmux via `llm-scheduler`.                                                                                                                     |
+| `-g`, `--command-template TEMPLATE`                                 | Override provider syntax. Supports `{tool}`, `{prompt}`, `{prompt_file}`, and `{cwd}`.                                                                        |
+| `-y`, `--auto-confirm`                                              | Auto-confirm recognised safe trust prompts. This is the default.                                                                                              |
+| `-Y`, `--no-auto-confirm`                                           | Disable safe auto-confirmation.                                                                                                                               |
+| `-q`, `--headless-idle-timeout SECONDS`                             | Abort headless fresh mode after no output progress. Default: `600`. Use `0` to disable.                                                                       |
+| `-Q`, `--headless-question-timeout SECONDS`                         | Abort headless fresh mode after question-like output stalls. Default: `30`. Use `0` to disable.                                                               |
+| `-S`, `--state-file FILE`                                           | Store current provider index. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json`.                                                    |
+| `-L`, `--log-dir DIR`                                               | Set Ralph log directory. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.                                                               |
+| `-k`, `--wake`                                                      | Pass best-effort wake scheduling to `llm-scheduler`.                                                                                                          |
+| `-U`, `--suspend-until-ready`                                       | Suspend even for the selected tool's own wait gates.                                                                                                         |
+| `-d`, `--dry-run`                                                   | Resolve rotation and usage state without submitting.                                                                                                          |
+| `-h`, `--help`                                                      | Show help.                                                                                                                                                    |
 
 The following options are passed through to `llm-scheduler`:
 
 ```text
---scope
---min-remaining
---poll-interval
---max-unavailable-wait
---retry-delays
---cwd
---fresh
---headless
---tmux
---command-template
---auto-confirm
---no-auto-confirm
---headless-idle-timeout
---headless-question-timeout
+-s, --scope
+-m, --min-remaining
+-i, --poll-interval
+-u, --max-unavailable-wait
+-r, --retry-delays
+-R, --no-retry
+-C, --cwd
+-F, --fresh
+-H, --headless
+-T, --tmux
+-g, --command-template
+-y, --auto-confirm
+-Y, --no-auto-confirm
+-q, --headless-idle-timeout
+-Q, --headless-question-timeout
 ```
 
 ### `ralph-robin` Behavior
