@@ -678,10 +678,16 @@ stale after `LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE` seconds (default `60`, capped at
 60) while they claim an active window, so a brief network blip degrades to
 "unavailable" rather than to a misleadingly old percentage.
 
-While readers are in flight, `llm-usage` shows a small spinner on `stderr` that
-erases itself once the table is ready. It is shown only when `stderr` is an
-interactive terminal, so pipes, `--json` consumers, and batch scripts stay
-byte-clean. Disable it with `LLM_USAGE_NO_PROGRESS=1`.
+While readers are in flight, `llm-usage` shows a small spinner that erases
+itself once the table is ready. In `--watch` mode it docks to the right of the
+clock in the header (`LLM Usage · 14:29  ⠙ refreshing usage 3/6`) and the frame
+redraws in place — no full-screen wipe, so the dashboard updates without a
+flash. It uses only the most portable cursor sequences (`ESC[H`, `ESC[K`,
+`ESC[r;cH`, and `ESC 7`/`ESC 8` save-restore), so it renders correctly under
+tmux, GNU screen, and a raw telnet PTY. Outside `--watch`, the spinner sits on
+`stderr` and self-erases. It is shown only on an interactive terminal, so pipes,
+`--json` consumers, and batch scripts stay byte-clean. Disable it with
+`LLM_USAGE_NO_PROGRESS=1`.
 
 ### GitHub Copilot Notes
 

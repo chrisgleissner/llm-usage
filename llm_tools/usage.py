@@ -1049,11 +1049,21 @@ class ProgressReporter:
         stream: Any = None,
         label: str = "refreshing usage",
         interval: float = 0.1,
+        anchor: tuple[int, int] | None = None,
     ) -> None:
         self.enabled = enabled
         self.stream = stream if stream is not None else sys.stderr
         self.label = label
         self.interval = interval
+        # When ``anchor`` (a 1-based ``(row, col)``) is set, the spinner draws
+        # itself at that fixed screen cell instead of on the current line. The
+        # cursor is saved/restored around every write (DEC ESC 7 / ESC 8, the
+        # most widely supported sequence — vt100, xterm, the Linux console,
+        # tmux, and screen all honour it) so the caller can keep printing the
+        # body below without the spinner thread stealing the cursor. This is
+        # what lets the watch dashboard show "refreshing" to the right of the
+        # clock instead of trailing the table.
+        self.anchor = anchor
         self.frames = self.FRAMES_UNICODE if symbols else self.FRAMES_ASCII
         self._total = 0
         self._done = 0
@@ -1087,7 +1097,11 @@ class ProgressReporter:
             done, total = self._done, self._total
         count = f" {done}/{total}" if total else ""
         try:
-            self.stream.write(f"\r\033[K{frame} {self.label}{count}")
+            if self.anchor is not None:
+                row, col = self.anchor
+                self.stream.write(f"\0337\033[{row};{col}H\033[K{frame} {self.label}{count}\0338")
+            else:
+                self.stream.write(f"\r\033[K{frame} {self.label}{count}")
             self.stream.flush()
         except (OSError, ValueError):
             pass
@@ -1099,7 +1113,11 @@ class ProgressReporter:
         self._thread.join(timeout=1)
         self._thread = None
         try:
-            self.stream.write("\r\033[K")
+            if self.anchor is not None:
+                row, col = self.anchor
+                self.stream.write(f"\0337\033[{row};{col}H\033[K\0338")
+            else:
+                self.stream.write("\r\033[K")
             self.stream.flush()
         except (OSError, ValueError):
             pass
@@ -1176,55 +1194,138 @@ def read_all_provider_data(cfg: Config, progress: "ProgressReporter | None" = No
     return out
 
 
-def render_once(cfg: Config) -> None:
+def _fetch_provider_data(cfg: Config, anchor: tuple[int, int] | None = None) -> dict[str, Any]:
+    """Read every provider, animating the spinner while the slow reads run.
+
+    ``anchor`` pins the spinner to a fixed screen cell (used by the watch
+    dashboard to park "refreshing" beside the clock); the default ``None`` keeps
+    the classic single-line, self-erasing behaviour.
+    """
     progress = ProgressReporter(
         enabled=cfg.progress_enabled and not cfg.log_only,
         symbols=cfg.symbols_enabled,
+        anchor=anchor,
     )
     progress.start()
     try:
-        provider_data = read_all_provider_data(cfg, progress=progress)
+        return read_all_provider_data(cfg, progress=progress)
     finally:
         progress.stop()
-    codex_legacy = provider_data["codex"]
+
+
+def _emit_json(cfg: Config, provider_data: dict[str, Any]) -> None:
     claude_snap = provider_data["claude"]
-    copilot_snap = provider_data["copilot"]
-    kilo_snap = provider_data["kilo"]
-    opencode_snap = provider_data["opencode"]
-    minimax_snap = provider_data["minimax"]
-    if cfg.json_output:
-        claude_json = (
-            common.json_for_provider(_legacy_claude(claude_snap), "claude")
-            if claude_snap.available
-            else {
-                "provider": "claude",
-                "available": False,
-                "reason": claude_snap.reason,
-                "source": claude_snap.source,
-            }
-        )
-        obj = {
-            "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
-            "codex": common.json_for_provider(codex_legacy, "codex"),
-            "claude": claude_json,
-            "copilot": _legacy_copilot(copilot_snap, cfg.show_copilot_credits),
-            "kilo": _kilo_to_json(kilo_snap),
-            "opencode": _opencode_to_json(opencode_snap),
-            "minimax": _minimax_to_json(minimax_snap),
+    claude_json = (
+        common.json_for_provider(_legacy_claude(claude_snap), "claude")
+        if claude_snap.available
+        else {
+            "provider": "claude",
+            "available": False,
+            "reason": claude_snap.reason,
+            "source": claude_snap.source,
         }
-        print(json.dumps(obj, separators=(",", ":")))
-        return
-    rows = claude_rows(cfg, claude_snap)
-    rows.extend(codex_rows(cfg, codex_legacy))
-    rows.extend(copilot_rows(cfg, _legacy_copilot(copilot_snap, False)))
-    rows.extend(kilo_rows(cfg, _kilo_to_json(kilo_snap)))
-    rows.extend(minimax_rows(cfg, _minimax_to_json(minimax_snap)))
-    rows.extend(opencode_rows(cfg, _opencode_to_json(opencode_snap)))
+    )
+    obj = {
+        "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
+        "codex": common.json_for_provider(provider_data["codex"], "codex"),
+        "claude": claude_json,
+        "copilot": _legacy_copilot(provider_data["copilot"], cfg.show_copilot_credits),
+        "kilo": _kilo_to_json(provider_data["kilo"]),
+        "opencode": _opencode_to_json(provider_data["opencode"]),
+        "minimax": _minimax_to_json(provider_data["minimax"]),
+    }
+    print(json.dumps(obj, separators=(",", ":")))
+
+
+def _build_usage_rows(cfg: Config, provider_data: dict[str, Any]) -> tuple[list[Any], bool]:
+    rows = claude_rows(cfg, provider_data["claude"])
+    rows.extend(codex_rows(cfg, provider_data["codex"]))
+    rows.extend(copilot_rows(cfg, _legacy_copilot(provider_data["copilot"], False)))
+    rows.extend(kilo_rows(cfg, _kilo_to_json(provider_data["kilo"])))
+    rows.extend(minimax_rows(cfg, _minimax_to_json(provider_data["minimax"])))
+    rows.extend(opencode_rows(cfg, _opencode_to_json(provider_data["opencode"])))
     show_model = any(row.model for row in rows)
+    return rows, show_model
+
+
+def _capture(fn: Any) -> list[str]:
+    """Run a print-based renderer and return its output as lines (no trailing blank)."""
+    from io import StringIO
+    import contextlib
+
+    buf = StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn()
+    text = buf.getvalue()
+    if text.endswith("\n"):
+        text = text[:-1]
+    return text.split("\n")
+
+
+def render_once(cfg: Config) -> None:
+    provider_data = _fetch_provider_data(cfg)
+    if cfg.json_output:
+        _emit_json(cfg, provider_data)
+        return
+    rows, show_model = _build_usage_rows(cfg, provider_data)
     if not cfg.no_header:
         print_dashboard_header(cfg)
         print_table_header(cfg, show_model)
     print_usage_rows(cfg, rows)
+
+
+def render_watch_frame(cfg: Config) -> None:
+    """Render one watch frame, redrawing in place with the refresh spinner
+    docked to the right of the clock.
+
+    The header (which carries the timestamp) needs no provider data, so it is
+    painted *first*; the spinner then animates beside the clock while the slow
+    provider reads run, and the table fills in underneath once the data lands.
+    Lines are cleared individually (``ESC[K``) and the frame is closed with
+    ``ESC[J`` rather than a full ``ESC[2J`` wipe, so the dashboard updates
+    without the flash you get from clearing the whole screen — and using only
+    the most portable CSI sequences keeps it correct under tmux, screen, and a
+    raw telnet PTY alike.
+    """
+    out = sys.stdout
+    is_tty = out.isatty()
+    # The inline-spinner choreography needs a TTY, the plain table layout, and a
+    # header to anchor to. Anything else (piped output, JSON, --no-header) falls
+    # back to the simple clear-and-redraw path.
+    if not is_tty or cfg.json_output or cfg.no_header:
+        provider_data = _fetch_provider_data(cfg)
+        if is_tty:
+            out.write("\033[2J\033[H")
+        if cfg.json_output:
+            _emit_json(cfg, provider_data)
+        else:
+            rows, show_model = _build_usage_rows(cfg, provider_data)
+            if not cfg.no_header:
+                print_dashboard_header(cfg)
+                print_table_header(cfg, show_model)
+            print_usage_rows(cfg, rows)
+        return
+
+    # 1. Home the cursor (no full-screen wipe → no flicker) and paint the
+    #    data-independent header right away.
+    out.write("\033[H")
+    header_lines = _capture(lambda: print_dashboard_header(cfg))
+    for line in header_lines:
+        out.write(f"{line}\033[K\n")
+    out.flush()
+
+    # 2. Dock the spinner one column past the header's first line (the clock).
+    spinner_col = len(header_lines[0]) + 2
+    provider_data = _fetch_provider_data(cfg, anchor=(1, spinner_col))
+
+    # 3. The data is in — fill in the table beneath the header, clearing each
+    #    line, then erase any rows left over from a previous, taller frame.
+    rows, show_model = _build_usage_rows(cfg, provider_data)
+    body_lines = _capture(lambda: (print_table_header(cfg, show_model), print_usage_rows(cfg, rows)))
+    for line in body_lines:
+        out.write(f"{line}\033[K\n")
+    out.write("\033[J")
+    out.flush()
 
 
 def _legacy_codex(snap: Any) -> dict[str, Any] | None:
@@ -1443,16 +1544,10 @@ def main(argv: list[str] | None = None) -> int:
         log_once(cfg)
         return 0
     if cfg.watch_interval != "0":
+        if sys.stdout.isatty():
+            print("\033[2J\033[H", end="")  # one clean wipe before the first redraw-in-place frame
         while True:
-            from io import StringIO
-            import contextlib
-
-            buf = StringIO()
-            with contextlib.redirect_stdout(buf):
-                render_once(cfg)
-            if sys.stdout.isatty():
-                print("\033[2J\033[H", end="")
-            print(buf.getvalue(), end="")
+            render_watch_frame(cfg)
             time.sleep(float(cfg.watch_interval))
     else:
         render_once(cfg)

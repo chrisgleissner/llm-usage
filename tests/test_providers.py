@@ -401,6 +401,53 @@ def test_progress_reporter_animates_then_erases() -> None:
     assert output.endswith("\r\033[K")
 
 
+def test_progress_reporter_anchor_docks_to_fixed_cell() -> None:
+    import io
+
+    buf = io.StringIO()
+    reporter = usage.ProgressReporter(enabled=True, stream=buf, interval=0.01, anchor=(1, 19))
+    reporter.start()
+    reporter.begin(6)
+    reporter.advance()
+    time.sleep(0.05)
+    reporter.stop()
+    output = buf.getvalue()
+    # Draws at the fixed cell with cursor save/restore so body printing below is
+    # never disturbed, and never uses the line-relative carriage-return form.
+    assert "\x1b7\x1b[1;19H\x1b[K" in output
+    assert output.count("\x1b8") >= 1
+    assert "\r\x1b[K" not in output
+    # Fully erased at the same cell on stop, leaving the header line clean.
+    assert output.endswith("\x1b7\x1b[1;19H\x1b[K\x1b8")
+
+
+def test_render_watch_frame_docks_spinner_right_of_clock(monkeypatch, capsys) -> None:
+    # Pretend stdout is a TTY so the inline-spinner redraw path is taken.
+    monkeypatch.setattr(usage.sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(
+        usage,
+        "_fetch_provider_data",
+        lambda cfg, anchor=None: {
+            "codex": {"provider": "codex", "available": False, "reason": "test", "source": "test"},
+            **{
+                k: usage.unavailable_snapshot(k, "test")
+                for k in ("claude", "copilot", "kilo", "opencode", "minimax")
+            },
+        },
+    )
+    cfg = usage.parse_args([])
+    cfg.watch_interval = "1"
+    usage.render_watch_frame(cfg)
+    out = capsys.readouterr().out
+    # Homes the cursor (no full ESC[2J wipe) and closes the frame with ESC[J.
+    assert out.startswith("\x1b[H")
+    assert "\x1b[2J" not in out
+    assert out.rstrip().endswith("\x1b[J")
+    # Header line still carries the clock and gets a per-line clear.
+    assert "LLM Usage" in out
+    assert "\x1b[K" in out
+
+
 def test_progress_reporter_ascii_frames_without_symbols() -> None:
     import io
 
