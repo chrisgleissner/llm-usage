@@ -177,8 +177,12 @@ def test_select_tool_falls_back_to_kilo_when_codex_rate_limited(
 
 
 def test_select_tool_uses_kilo_in_byok_mode(
-    tmp_path: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch, fake_bin: Path
 ) -> None:
+    fake = fake_bin / "kilo"
+    fake.write_text("#!/usr/bin/env python3\nprint('mock')\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake_bin))
     monkeypatch.setenv("LLM_USAGE_KILO_MODE", "byok")
     monkeypatch.setenv("LLM_USAGE_KILO_BALANCE", "5")
     cfg = ralph_robin.RalphConfig(tools=["kilo"], even_burn=False, scope="auto")
@@ -186,3 +190,17 @@ def test_select_tool_uses_kilo_in_byok_mode(
     selection = ralph_robin.select_tool(cfg, logs, current_index=0, skipped=set())
     assert selection["tool"] == "kilo"
     assert selection["decision"]["usable"] is True
+
+
+def test_select_tool_marks_kilo_byok_missing_cli_unusable(
+    tmp_path: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "/var/empty")
+    monkeypatch.setenv("LLM_USAGE_KILO_MODE", "byok")
+    monkeypatch.setenv("LLM_USAGE_KILO_BALANCE", "5")
+    cfg = ralph_robin.RalphConfig(tools=["kilo"], even_burn=False, scope="auto")
+    logs = common.setup_run_logs(tmp_path, "test")
+    selection = ralph_robin.select_tool(cfg, logs, current_index=0, skipped=set())
+    assert selection["tool"] == "kilo"
+    assert selection["decision"]["usable"] is False
+    assert selection["decision"]["reason"] == "missing-cli"
