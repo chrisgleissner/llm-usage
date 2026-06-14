@@ -437,5 +437,15 @@ __all__ = [
     "kilo_min_balance",
     "kilo_mode",
     "kilo_monthly_reset_epoch",
+    "read",
     "read_kilo",
 ]
+
+
+def read(env: dict[str, str] | None = None) -> ProviderSnapshot:
+    """Consistent with the other provider modules: ``read(env)`` returns a
+    :class:`ProviderSnapshot`. The actual implementation lives in
+    :func:`read_kilo`; this is the public name used by
+    :mod:`llm_tools.providers` callers.
+    """
+    return read_kilo(env)

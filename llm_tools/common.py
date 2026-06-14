@@ -1252,10 +1252,7 @@ def usage_snapshot_for_tool(tool: str, env: dict[str, str] | None = None) -> dic
     if tool == "copilot":
         return json_for_copilot(read_copilot(env), False)
     if tool == "kilo":
-        from .providers import read_kilo
-        from .capacity import CapacityScope
-
-        snap = read_kilo(env)
+        snap = _kilo_snapshot(env)
         return {
             "provider": snap.provider,
             "available": snap.available,
@@ -1265,6 +1262,12 @@ def usage_snapshot_for_tool(tool: str, env: dict[str, str] | None = None) -> dic
             "scopes": [_scope_to_dict(s) for s in snap.scopes],
         }
     return {"provider": tool, "available": False, "reason": "unsupported-tool"}
+
+
+def _kilo_snapshot(env: dict[str, str] | None):
+    from .providers import read_kilo
+
+    return read_kilo(env)
 
 
 def _scope_to_dict(scope: Any) -> dict[str, Any]:

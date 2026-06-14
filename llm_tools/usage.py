@@ -736,43 +736,109 @@ def print_kilo_rows(cfg: Config, kilo_json: dict[str, Any] | None) -> None:
 
 
 def render_once(cfg: Config) -> None:
-    codex = common.read_codex()
-    claude = common.read_claude()
-    copilot = common.read_copilot()
-    from .providers import read_kilo
+    from .providers import read_claude_snapshot, read_copilot_snapshot, read_kilo
 
-    kilo = read_kilo()
+    codex_legacy = common.read_codex()
+    claude_snap = read_claude_snapshot()
+    copilot_snap = read_copilot_snapshot()
+    kilo_snap = read_kilo()
     if cfg.json_output:
         obj = {
             "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
-            "codex": common.json_for_provider(codex, "codex"),
-            "claude": common.json_for_provider(claude, "claude"),
-            "copilot": common.json_for_copilot(copilot, cfg.show_copilot_credits),
-            "kilo": _kilo_to_json(kilo),
+            "codex": common.json_for_provider(codex_legacy, "codex"),
+            "claude": common.json_for_provider(_legacy_claude(claude_snap), "claude"),
+            "copilot": _legacy_copilot(copilot_snap, cfg.show_copilot_credits),
+            "kilo": _kilo_to_json(kilo_snap),
         }
         print(json.dumps(obj, separators=(",", ":")))
         return
-    rows = codex_rows(cfg, codex)
-    if claude:
-        source = claude.get("source", "")
-        five_used = (claude.get("five_hour") or {}).get("used")
-        week_used = (claude.get("week") or {}).get("used")
+    rows = codex_rows(cfg, codex_legacy)
+    if claude_snap.available:
+        legacy = _legacy_claude(claude_snap)
+        source = legacy.get("source", "")
+        five_used = (legacy.get("five_hour") or {}).get("used")
+        week_used = (legacy.get("week") or {}).get("used")
         common.log_usage_sample("Claude", "5h", common.remaining_from_used(five_used))
         common.log_usage_sample("Claude", "weekly", common.remaining_from_used(week_used))
         rows.extend(
             [
-                row_from_used(cfg, "Claude", "5h", five_used, (claude.get("five_hour") or {}).get("resets_at"), source),
-                row_from_used(cfg, "Claude", "weekly", week_used, (claude.get("week") or {}).get("resets_at"), source),
+                row_from_used(cfg, "Claude", "5h", five_used, (legacy.get("five_hour") or {}).get("resets_at"), source),
+                row_from_used(cfg, "Claude", "weekly", week_used, (legacy.get("week") or {}).get("resets_at"), source),
             ]
         )
     else:
         rows.extend(unavailable_rows("Claude"))
-    rows.extend(copilot_rows(cfg, copilot))
-    rows.extend(kilo_rows(cfg, _kilo_to_json(kilo)))
+    rows.extend(copilot_rows(cfg, _legacy_copilot(copilot_snap, False)))
+    rows.extend(kilo_rows(cfg, _kilo_to_json(kilo_snap)))
     if not cfg.no_header:
         print_dashboard_header(cfg)
         print_table_header(cfg)
     print_usage_rows(cfg, rows)
+
+
+def _legacy_codex(snap: Any) -> dict[str, Any] | None:
+    """Deprecated: Codex JSON output keeps the legacy wire format
+    (``rows`` array with per-model entries) and is read directly via
+    ``common.read_codex``. This helper is kept for the few call sites
+    that still need the snapshot projection.
+    """
+    if not snap.available:
+        return None
+    out: dict[str, Any] = {
+        "provider": snap.provider,
+        "source": snap.source,
+        "rows": [],
+    }
+    five = next((s for s in snap.scopes if s.name == "5h"), None)
+    week = next((s for s in snap.scopes if s.name == "weekly"), None)
+    out["five_hour"] = (
+        {"resets_at": five.resets_at, "used": (100.0 - five.remaining_percent) if five.remaining_percent is not None else None}
+        if five
+        else None
+    )
+    out["week"] = (
+        {"resets_at": week.resets_at, "used": (100.0 - week.remaining_percent) if week.remaining_percent is not None else None}
+        if week
+        else None
+    )
+    if snap.selected_model:
+        out["plan"] = snap.selected_model
+    return out
+
+
+def _legacy_claude(snap: Any) -> dict[str, Any] | None:
+    if not snap.available:
+        return None
+    out: dict[str, Any] = {"provider": snap.provider, "source": snap.source}
+    for src_name, target in (("5h", "five_hour"), ("weekly", "week")):
+        scope = next((s for s in snap.scopes if s.name == src_name), None)
+        if scope is None:
+            continue
+        out[target] = {
+            "resets_at": scope.resets_at,
+            "used": (100.0 - scope.remaining_percent) if scope.remaining_percent is not None else None,
+        }
+    return out
+
+
+def _legacy_copilot(snap: Any, show_credits: bool) -> dict[str, Any] | None:
+    if not snap.available:
+        return {
+            "provider": snap.provider,
+            "source": snap.source,
+            "available": False,
+            "reason": snap.reason or "unavailable",
+        }
+    monthly = next((s for s in snap.scopes if s.name == "monthly"), None)
+    out: dict[str, Any] = {
+        "provider": snap.provider,
+        "source": snap.source,
+        "available": True,
+    }
+    if monthly is not None and monthly.remaining_percent is not None:
+        used = max(0.0, min(100.0, 100.0 - monthly.remaining_percent))
+        out["monthly"] = {"used": used, "remaining": monthly.remaining_percent}
+    return out
 
 
 def _kilo_to_json(snap: Any) -> dict[str, Any]:
